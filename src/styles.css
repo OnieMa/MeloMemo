@@ -82,7 +82,7 @@ body:has(.search-dock.open) .mobile-nav {
 }
 
 body:has(.youtube-preview-backdrop) main,
-body:has(.youtube-preview-backdrop) .shell-nav > *:not(.youtube-preview-backdrop),
+body:has(.youtube-preview-backdrop) .shell-nav > *:not(.youtube-preview-backdrop):not(.metadata-dialog-backdrop),
 body:has(.youtube-preview-backdrop) .mobile-nav {
   filter: blur(7px);
   transform: scale(0.99);
