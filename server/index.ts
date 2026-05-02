@@ -4,11 +4,13 @@ import fastifyStatic from "@fastify/static";
 import { config } from "dotenv";
 import Fastify from "fastify";
 import { PrismaClient } from "@prisma/client";
+import { execFile } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 
@@ -19,14 +21,33 @@ const prisma = new PrismaClient();
 const app = Fastify({
   logger: true,
 });
+app.removeContentTypeParser("application/json");
+app.addContentTypeParser("application/json", { parseAs: "string" }, (_request, body, done) => {
+  const rawBody = typeof body === "string" ? body : body.toString("utf8");
+
+  if (rawBody.trim().length === 0) {
+    done(null, {});
+    return;
+  }
+
+  try {
+    done(null, JSON.parse(rawBody));
+  } catch (error) {
+    done(error instanceof Error ? error : new Error("Invalid JSON body"), undefined);
+  }
+});
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
 const uploadRoot = path.join(projectRoot, "server", "uploads");
 const ttsRoot = path.join(uploadRoot, "tts");
+const youtubeRoot = path.join(uploadRoot, "youtube");
 const dictionaryRoot = path.join(projectRoot, "server", "dictionaries");
 const ecdictCsvPath = path.join(dictionaryRoot, "ecdict.csv");
 const DEFAULT_USER_EMAIL = "demo@melomemo.local";
 const DEFAULT_USER_PASSWORD = "melomemo-demo";
+const YOUTUBE_SEARCH_LIMIT = 20;
+const execFileAsync = promisify(execFile);
+const wechatLoginSessions = new Map<string, WechatLoginSession>();
 
 type VocabularyPayload = {
   word?: string;
@@ -70,6 +91,14 @@ type DictionaryEntry = {
   source: string;
 };
 
+type DictionaryLookupResult = DictionaryEntry & {
+  pronunciation: {
+    engine: string;
+    lang: string;
+    accent: string;
+  };
+};
+
 type DictionaryApiEntry = {
   word: string;
   phonetic?: string;
@@ -86,6 +115,17 @@ type AuthPayload = {
   displayName?: string;
 };
 
+type WechatCheckQuery = {
+  sessionId?: string;
+};
+
+type WechatLoginSession = {
+  id: string;
+  expiresAt: number;
+  confirmedAt: number;
+  code: string;
+};
+
 type FavoriteSongPayload = {
   id?: string;
   title?: string;
@@ -93,6 +133,10 @@ type FavoriteSongPayload = {
   audioUrl?: string;
   coverUrl?: string;
   lyrics?: Array<{ id: string; time: number; text: string }>;
+};
+
+type SongLyricsPayload = {
+  lyrics?: Array<{ id?: string; time?: number | string; text?: string }>;
 };
 
 type ProfilePayload = {
@@ -103,6 +147,78 @@ type ProfilePayload = {
   cumulativeDays?: number;
   masteredWords?: number;
   conqueredSentences?: number;
+};
+
+type StudyHeartbeatPayload = {
+  seconds?: number | string;
+  songId?: string;
+  songTitle?: string;
+  dateKey?: string;
+};
+
+type YouTubeSearchItem = {
+  id?: {
+    videoId?: string;
+  };
+  snippet?: {
+    title?: string;
+    description?: string;
+    channelTitle?: string;
+    publishedAt?: string;
+    thumbnails?: {
+      default?: { url?: string };
+      medium?: { url?: string };
+      high?: { url?: string };
+    };
+  };
+};
+
+type YouTubeSearchResponse = {
+  items?: YouTubeSearchItem[];
+};
+
+type YouTubeSearchResult = {
+  id: string;
+  title: string;
+  channelTitle: string;
+  description: string;
+  publishedAt?: string;
+  thumbnailUrl?: string;
+  url: string;
+  sourceType?: "youtube" | "local";
+  song?: unknown;
+};
+
+type YouTubeDownloadPayload = {
+  videoId?: string;
+  title?: string;
+  channelTitle?: string;
+  thumbnailUrl?: string;
+};
+
+type LyricLine = {
+  id: string;
+  time: number;
+  text: string;
+};
+
+type LrcLibTrack = {
+  id?: number;
+  name?: string;
+  trackName?: string;
+  artistName?: string;
+  albumName?: string;
+  duration?: number;
+  instrumental?: boolean;
+  plainLyrics?: string | null;
+  syncedLyrics?: string | null;
+};
+
+type YouTubeVideoInfo = {
+  title?: string;
+  uploader?: string;
+  channel?: string;
+  duration?: number;
 };
 
 const fallbackDictionary: Record<
@@ -146,6 +262,7 @@ await app.register(multipart, {
 });
 await mkdir(uploadRoot, { recursive: true });
 await mkdir(ttsRoot, { recursive: true });
+await mkdir(youtubeRoot, { recursive: true });
 await mkdir(dictionaryRoot, { recursive: true });
 await app.register(fastifyStatic, {
   root: uploadRoot,
@@ -196,9 +313,9 @@ const ensureUserProfile = async (userId: string) =>
     update: {},
     create: {
       userId,
-      cumulativeDays: 128,
-      masteredWords: 1450,
-      conqueredSentences: 320,
+      cumulativeDays: 0,
+      masteredWords: 0,
+      conqueredSentences: 0,
     },
   });
 
@@ -212,6 +329,28 @@ const ensureDefaultUser = async () => {
       displayName: "音律旅人",
       avatarUrl:
         "https://lh3.googleusercontent.com/aida-public/AB6AXuBUysvjdILh1cXFtHAS32MsdeoPUxMUQui-iBosnBkTcRUVWczqZBdf4NjfRqwB-oKLn7iXPkERDhTXs4BkURjp-NBtVQxBvSDzGXuiPLUdWNMo37HDg6LQcDtr41Zk2CF73lUXrvLrCzsQvPZk8V6O2Kpgf9hq4FNVCkdtttae7ZW0Q0l3VsZDPKh-zvmv8O6nycuhNQ1jsEVPC8BAUPPwQ2ZwjB6SsDg-bQxyEVX6_5l-IfJpCmpPlqbu-_F2b5mGyQ8rDEHAu3Pb",
+    },
+  });
+  await ensureUserProfile(user.id);
+  return user;
+};
+
+const ensureWechatDemoUser = async (session: WechatLoginSession) => {
+  const email = `wechat_${session.code.toLowerCase()}@melomemo.local`;
+  const user = await prisma.user.upsert({
+    where: { email },
+    update: {
+      displayName: "微信乐友",
+      avatarUrl:
+        "https://images.unsplash.com/photo-1516280440614-37939bbacd81?auto=format&fit=crop&w=300&q=80",
+    },
+    create: {
+      email,
+      passwordHash: hashPassword(randomBytes(18).toString("hex")),
+      displayName: "微信乐友",
+      avatarUrl:
+        "https://images.unsplash.com/photo-1516280440614-37939bbacd81?auto=format&fit=crop&w=300&q=80",
+      bio: "用微信登录，继续在旋律里积累英语记忆",
     },
   });
   await ensureUserProfile(user.id);
@@ -233,12 +372,125 @@ const getRequestUser = async (request: { headers: Record<string, string | string
   return ensureDefaultUser();
 };
 
+const STUDY_TIME_ZONE = process.env.APP_TIME_ZONE || "Asia/Shanghai";
+
+const getStudyDateKey = (date = new Date()) => {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: STUDY_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const getPart = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+
+  return `${getPart("year")}-${getPart("month")}-${getPart("day")}`;
+};
+
+const isValidDateKey = (value?: string) => Boolean(value?.match(/^\d{4}-\d{2}-\d{2}$/));
+
+const addDaysToDateKey = (dateKey: string, days: number) => {
+  const date = new Date(`${dateKey}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+};
+
+const getStudyDayLabel = (dateKey: string) => {
+  const labels = ["日", "一", "二", "三", "四", "五", "六"];
+  return labels[new Date(`${dateKey}T00:00:00.000Z`).getUTCDay()];
+};
+
+const parseStudySongIds = (value: string) => {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+};
+
+const normalizeStudySeconds = (value: number | string | undefined) => {
+  const numberValue = Number(value);
+
+  if (!Number.isFinite(numberValue)) {
+    return 0;
+  }
+
+  return Math.min(300, Math.max(0, Math.round(numberValue)));
+};
+
+const buildStudyStats = async (userId: string, conqueredSentences = 0) => {
+  const [studyDays, favoriteSongCount, masteredWords] = await Promise.all([
+    prisma.userStudyDay.findMany({
+      where: { userId },
+      orderBy: { dateKey: "asc" },
+    }),
+    prisma.userFavoriteSong.count({
+      where: { userId },
+    }),
+    prisma.vocabularyWord.count({
+      where: { userId },
+    }),
+  ]);
+  const dayMap = new Map(studyDays.map((day) => [day.dateKey, day]));
+  const todayKey = getStudyDateKey();
+  const streakAnchor = dayMap.has(todayKey) ? todayKey : addDaysToDateKey(todayKey, -1);
+  let streakDays = 0;
+
+  for (let dateKey = streakAnchor; dayMap.has(dateKey); dateKey = addDaysToDateKey(dateKey, -1)) {
+    streakDays += 1;
+  }
+
+  const totalStudySeconds = studyDays.reduce((total, day) => total + day.totalSeconds, 0);
+  const studyCurve = Array.from({ length: 30 }, (_, index) => {
+    const dateKey = addDaysToDateKey(todayKey, index - 29);
+    const day = dayMap.get(dateKey);
+    return {
+      dateKey,
+      day: index === 29 ? "今天" : getStudyDayLabel(dateKey),
+      minutes: day ? Math.round(day.totalSeconds / 60) : 0,
+      studied: Boolean(day),
+    };
+  });
+  const todayStudy = dayMap.get(todayKey);
+
+  return {
+    cumulativeDays: studyDays.length,
+    masteredWords,
+    conqueredSentences,
+    favoriteSongs: favoriteSongCount,
+    totalStudySeconds,
+    totalStudyMinutes: Math.round(totalStudySeconds / 60),
+    streakDays,
+    todayStudied: Boolean(todayStudy),
+    todaySeconds: todayStudy?.totalSeconds ?? 0,
+    studyCurve,
+  };
+};
+
 const sanitizeFileName = (value: string) =>
   value
     .replace(/[^\w.\-\u4e00-\u9fa5]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 120) || "file";
+
+const buildYouTubeUploadUrl = (...segments: string[]) =>
+  `/uploads/youtube/${segments.map((segment) => encodeURIComponent(segment)).join("/")}`;
+
+const uploadUrlToFilePath = (url?: string) => {
+  if (!url?.startsWith("/uploads/")) {
+    return undefined;
+  }
+
+  const relativePath = decodeURIComponent(url.replace(/^\/uploads\//, ""));
+  const filePath = path.resolve(uploadRoot, relativePath);
+  const safeUploadRoot = path.resolve(uploadRoot);
+  if (filePath !== safeUploadRoot && !filePath.startsWith(`${safeUploadRoot}${path.sep}`)) {
+    return undefined;
+  }
+
+  return filePath;
+};
 
 const normalizeTtsText = (value?: string) =>
   (value ?? "")
@@ -247,6 +499,74 @@ const normalizeTtsText = (value?: string) =>
     .slice(0, 120);
 
 const normalizeTtsCacheText = (value: string) => value.toLocaleLowerCase("en-US");
+
+const normalizeYouTubeVideoId = (value?: string) =>
+  (value ?? "").trim().match(/^[a-zA-Z0-9_-]{6,32}$/)?.[0] ?? "";
+
+const normalizeLyricsPayload = (lyrics: SongLyricsPayload["lyrics"]) =>
+  (lyrics ?? [])
+    .map((line, index) => {
+      const text = line.text?.trim();
+      const timeValue = Number(line.time);
+
+      if (!text) {
+        return null;
+      }
+
+      return {
+        id: line.id?.trim() || `line-${index}`,
+        time: Number.isFinite(timeValue) ? Math.max(0, timeValue) : index * 4,
+        text,
+      };
+    })
+    .filter((line): line is { id: string; time: number; text: string } => Boolean(line));
+
+const decodeHtmlEntities = (value: string) =>
+  value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+
+const cleanSongText = (value?: string) =>
+  decodeHtmlEntities(value ?? "")
+    .replace(/\[[^\]]*(?:official|music video|lyrics?|lyric video|audio|visuali[sz]er|mv|hd|4k)[^\]]*\]/gi, "")
+    .replace(/\([^)]*(?:official|music video|lyrics?|lyric video|audio|visuali[sz]er|mv|hd|4k)[^)]*\)/gi, "")
+    .replace(/\s+(?:official\s+)?(?:music\s+video|lyrics?|lyric\s+video|audio|visuali[sz]er|mv)\s*$/gi, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+[-|]\s*$/g, "")
+    .trim();
+
+const normalizeArtistName = (value?: string) =>
+  cleanSongText(value)
+    .replace(/\s*-\s*Topic$/i, "")
+    .replace(/\s*VEVO$/i, "")
+    .trim();
+
+const getSongIdentity = ({
+  title,
+  artist,
+}: {
+  title?: string;
+  artist?: string;
+}) => {
+  const cleanedTitle = cleanSongText(title);
+  const cleanedArtist = normalizeArtistName(artist);
+  const titleParts = cleanedTitle.split(/\s+-\s+/).map((part) => cleanSongText(part)).filter(Boolean);
+
+  if (titleParts.length >= 2) {
+    return {
+      title: titleParts.slice(1).join(" - ") || cleanedTitle,
+      artist: titleParts[0] || cleanedArtist || "YouTube",
+    };
+  }
+
+  return {
+    title: cleanedTitle || "YouTube Song",
+    artist: cleanedArtist || "YouTube",
+  };
+};
 
 const clampNumber = (value: number | string | undefined, fallback: number) => {
   const numberValue = Number(value);
@@ -268,6 +588,596 @@ const fileExists = async (filePath: string) => {
 };
 
 const normalizeDictionaryWord = (value: string) => value.toLowerCase().replace(/[^a-z'-]/g, "");
+
+const normalizeSearchQuery = (value?: string) =>
+  (value ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+
+const extractYouTubeText = (value: unknown): string | undefined => {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const textValue = value as {
+    simpleText?: string;
+    runs?: Array<{ text?: string }>;
+  };
+
+  return textValue.simpleText || textValue.runs?.map((run) => run.text ?? "").join("").trim() || undefined;
+};
+
+const findYouTubeInitialData = (html: string) => {
+  const marker = "var ytInitialData = ";
+  const start = html.indexOf(marker);
+
+  if (start < 0) {
+    return null;
+  }
+
+  const jsonStart = start + marker.length;
+  const jsonEnd = html.indexOf(";</script>", jsonStart);
+
+  if (jsonEnd < 0) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(html.slice(jsonStart, jsonEnd));
+  } catch {
+    return null;
+  }
+};
+
+const collectYouTubeRenderers = (value: unknown, results: YouTubeSearchResult[]) => {
+  if (!value || results.length >= YOUTUBE_SEARCH_LIMIT) {
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectYouTubeRenderers(item, results);
+    }
+    return;
+  }
+
+  if (typeof value !== "object") {
+    return;
+  }
+
+  const current = value as Record<string, unknown> & {
+    videoRenderer?: {
+      videoId?: string;
+      title?: unknown;
+      ownerText?: unknown;
+      longBylineText?: unknown;
+      descriptionSnippet?: unknown;
+      publishedTimeText?: unknown;
+      thumbnail?: {
+        thumbnails?: Array<{ url?: string }>;
+      };
+    };
+  };
+  const renderer = current.videoRenderer;
+
+  if (renderer?.videoId && !results.some((result) => result.id === renderer.videoId)) {
+    const title = extractYouTubeText(renderer.title);
+    if (title) {
+      const thumbnails = renderer.thumbnail?.thumbnails ?? [];
+      const thumbnailUrl = thumbnails[thumbnails.length - 1]?.url;
+      results.push({
+        id: renderer.videoId,
+        title,
+        channelTitle: extractYouTubeText(renderer.ownerText) || extractYouTubeText(renderer.longBylineText) || "YouTube",
+        description: extractYouTubeText(renderer.descriptionSnippet) || "",
+        publishedAt: extractYouTubeText(renderer.publishedTimeText),
+        thumbnailUrl,
+        url: `https://www.youtube.com/watch?v=${renderer.videoId}`,
+      });
+    }
+  }
+
+  for (const child of Object.values(current)) {
+    collectYouTubeRenderers(child, results);
+  }
+};
+
+const searchYouTubePage = async (query: string) => {
+  const params = new URLSearchParams({
+    search_query: `${query} song`,
+  });
+  const response = await fetch(`https://www.youtube.com/results?${params.toString()}`, {
+    headers: {
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "user-agent": "Mozilla/5.0 MeloMemo",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`YouTube search page failed: ${response.status}`);
+  }
+
+  const data = findYouTubeInitialData(await response.text());
+  const results: YouTubeSearchResult[] = [];
+  collectYouTubeRenderers(data, results);
+  return results;
+};
+
+const getFileByExtension = async (directory: string, extensions: string[]) => {
+  const files = await readdir(directory);
+  return files.find((file) => extensions.some((extension) => file.toLowerCase().endsWith(extension)));
+};
+
+const downloadRemoteCover = async (
+  coverUrl: string | undefined,
+  directory: string,
+  urlDirectory: string,
+  fileBaseName: string,
+) => {
+  if (!coverUrl?.trim()) {
+    return undefined;
+  }
+
+  const response = await fetch(coverUrl);
+  if (!response.ok) {
+    return undefined;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const extension = contentType.includes("png") ? ".png" : contentType.includes("webp") ? ".webp" : ".jpg";
+  const fileName = `${fileBaseName}-cover${extension}`;
+  const filePath = path.join(directory, fileName);
+  const buffer = Buffer.from(await response.arrayBuffer());
+  await writeFile(filePath, buffer);
+  return buildYouTubeUploadUrl(urlDirectory, fileName);
+};
+
+const removeUploadUrl = async (url?: string) => {
+  const filePath = uploadUrlToFilePath(url);
+  if (filePath) {
+    await rm(filePath, { force: true });
+  }
+};
+
+const removeSongStoredFiles = async (song: {
+  audioUrl: string;
+  coverUrl?: string | null;
+  lyricsUrl?: string | null;
+  sourceType?: string | null;
+}) => {
+  const audioFilePath = uploadUrlToFilePath(song.audioUrl);
+  const audioDirectory = audioFilePath ? path.dirname(audioFilePath) : undefined;
+  const isYouTubeSongDirectory =
+    song.sourceType === "youtube" &&
+    audioDirectory?.startsWith(path.resolve(youtubeRoot)) &&
+    audioDirectory !== path.resolve(youtubeRoot);
+
+  if (isYouTubeSongDirectory && audioDirectory) {
+    await rm(audioDirectory, { recursive: true, force: true });
+    return;
+  }
+
+  await Promise.all([
+    removeUploadUrl(song.audioUrl),
+    removeUploadUrl(song.coverUrl ?? undefined),
+    removeUploadUrl(song.lyricsUrl ?? undefined),
+  ]);
+};
+
+const isSongAudioAvailable = async (song: { audioUrl: string }) => {
+  const audioFilePath = uploadUrlToFilePath(song.audioUrl);
+  return audioFilePath ? fileExists(audioFilePath) : true;
+};
+
+const pruneMissingSongFiles = async <T extends {
+  id: string;
+  audioUrl: string;
+  coverUrl?: string | null;
+  lyricsUrl?: string | null;
+  sourceType?: string | null;
+}>(songs: T[]) => {
+  const availableSongs: T[] = [];
+
+  for (const song of songs) {
+    if (await isSongAudioAvailable(song)) {
+      availableSongs.push(song);
+      continue;
+    }
+
+    await prisma.userFavoriteSong.deleteMany({ where: { songId: song.id } });
+    await prisma.song.deleteMany({ where: { id: song.id } });
+    await removeSongStoredFiles(song);
+  }
+
+  return availableSongs;
+};
+
+const parseTimestampSeconds = (value: string) => {
+  const match = value.match(/(?:(\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?/);
+  if (!match) {
+    return 0;
+  }
+
+  const hours = Number(match[1] ?? 0);
+  const minutes = Number(match[2] ?? 0);
+  const seconds = Number(match[3] ?? 0);
+  const fraction = Number((match[4] ?? "0").padEnd(3, "0"));
+  return hours * 3600 + minutes * 60 + seconds + fraction / 1000;
+};
+
+const parseLrcLyrics = (rawLyrics: string): LyricLine[] => {
+  const lines = rawLyrics
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const lyrics = lines.flatMap((line, index) => {
+    if (/^\[(ti|ar|al|au|by|offset|length|re|ve):[^\]]*\]$/i.test(line)) {
+      return [];
+    }
+
+    const matches = [...line.matchAll(/\[(\d{1,3}):(\d{2})(?:[.,](\d{1,3}))?\]/g)];
+    const text = line.replace(/\[(\d{1,3}):(\d{2})(?:[.,](\d{1,3}))?\]/g, "").trim();
+
+    if (matches.length === 0) {
+      return text ? [{ id: `plain-${index}`, time: index * 4, text }] : [];
+    }
+
+    return matches.map((match, matchIndex) => {
+      const minutes = Number(match[1]);
+      const seconds = Number(match[2]);
+      const fraction = Number((match[3] ?? "0").padEnd(3, "0"));
+      return {
+        id: `lrc-${index}-${matchIndex}`,
+        time: minutes * 60 + seconds + fraction / 1000,
+        text: text || "♪",
+      };
+    });
+  });
+
+  return lyrics.sort((a, b) => a.time - b.time);
+};
+
+const parsePlainLyrics = (rawLyrics?: string | null): LyricLine[] =>
+  (rawLyrics ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((text, index) => ({
+      id: `plain-${index}`,
+      time: index * 4,
+      text,
+    }));
+
+const stripWebVttTags = (value: string) =>
+  value
+    .replace(/<[^>]+>/g, "")
+    .replace(/\{\\[^}]+\}/g, "")
+    .replace(/&nbsp;/g, " ")
+    .trim();
+
+const parseWebVttLyrics = (rawSubtitles: string): LyricLine[] => {
+  const blocks = rawSubtitles.replace(/\r/g, "").split(/\n{2,}/);
+  const seen = new Set<string>();
+  const lines: LyricLine[] = [];
+
+  blocks.forEach((block, index) => {
+    const rows = block.split("\n").map((row) => row.trim()).filter(Boolean);
+    const timingIndex = rows.findIndex((row) => row.includes("-->"));
+    if (timingIndex < 0) {
+      return;
+    }
+
+    const start = rows[timingIndex].split("-->")[0]?.trim();
+    const text = stripWebVttTags(rows.slice(timingIndex + 1).join(" "))
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!start || !text || seen.has(`${start}:${text}`)) {
+      return;
+    }
+
+    seen.add(`${start}:${text}`);
+    lines.push({
+      id: `caption-${index}`,
+      time: parseTimestampSeconds(start),
+      text,
+    });
+  });
+
+  return lines.sort((a, b) => a.time - b.time);
+};
+
+const getYouTubeInfo = async (videoUrl: string): Promise<YouTubeVideoInfo> => {
+  try {
+    const { stdout } = await execFileAsync(
+      "yt-dlp",
+      ["--dump-single-json", "--no-playlist", "--skip-download", videoUrl],
+      {
+        timeout: 45000,
+        maxBuffer: 1024 * 1024 * 8,
+      },
+    );
+    return JSON.parse(stdout) as YouTubeVideoInfo;
+  } catch {
+    return {};
+  }
+};
+
+const findBestLrcLibTrack = (tracks: LrcLibTrack[], duration?: number) => {
+  const scored = tracks
+    .filter((track) => track.syncedLyrics || track.plainLyrics || track.instrumental)
+    .map((track) => {
+      const durationDelta = Number.isFinite(duration) && Number.isFinite(track.duration)
+        ? Math.abs(Number(track.duration) - Number(duration))
+        : 999;
+      const lyricsScore = track.syncedLyrics ? 0 : track.plainLyrics ? 20 : 50;
+      return {
+        track,
+        score: lyricsScore + Math.min(durationDelta, 300),
+      };
+    })
+    .sort((a, b) => a.score - b.score);
+
+  return scored[0]?.track;
+};
+
+const searchLrcLibLyrics = async ({
+  title,
+  artist,
+  duration,
+}: {
+  title: string;
+  artist: string;
+  duration?: number;
+}) => {
+  const params = new URLSearchParams({
+    track_name: title,
+    artist_name: artist,
+  });
+
+  if (Number.isFinite(duration)) {
+    params.set("duration", String(Math.round(duration ?? 0)));
+  }
+
+  const response = await fetch(`https://lrclib.net/api/search?${params.toString()}`, {
+    headers: {
+      "accept": "application/json",
+      "user-agent": "MeloMemo/0.1.0 (local lyrics lookup)",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`LRCLIB lookup failed: ${response.status}`);
+  }
+
+  const tracks = (await response.json()) as LrcLibTrack[];
+  const bestTrack = findBestLrcLibTrack(Array.isArray(tracks) ? tracks : [], duration);
+
+  if (!bestTrack || bestTrack.instrumental) {
+    return [];
+  }
+
+  if (bestTrack.syncedLyrics?.trim()) {
+    return parseLrcLyrics(bestTrack.syncedLyrics);
+  }
+
+  return parsePlainLyrics(bestTrack.plainLyrics);
+};
+
+const buildLrcLibLyricCandidates = (tracks: LrcLibTrack[], duration?: number) =>
+  tracks
+    .filter((track) => !track.instrumental && (track.syncedLyrics || track.plainLyrics))
+    .map((track) => {
+      const lyrics = track.syncedLyrics?.trim()
+        ? parseLrcLyrics(track.syncedLyrics)
+        : parsePlainLyrics(track.plainLyrics);
+      const durationDelta = Number.isFinite(duration) && Number.isFinite(track.duration)
+        ? Math.abs(Number(track.duration) - Number(duration))
+        : 999;
+
+      return {
+        id: String(track.id ?? `${track.artistName}-${track.name || track.trackName}`),
+        title: track.name || track.trackName || "Unknown Title",
+        artist: track.artistName || "Unknown Artist",
+        album: track.albumName,
+        duration: track.duration,
+        lyricType: track.syncedLyrics?.trim() ? "synced" : "plain",
+        lineCount: lyrics.length,
+        lyrics,
+        score: (track.syncedLyrics ? 0 : 20) + Math.min(durationDelta, 300),
+      };
+    })
+    .filter((candidate) => candidate.lyrics.length > 0)
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 10);
+
+const searchLrcLibLyricCandidates = async ({
+  title,
+  artist,
+  duration,
+}: {
+  title: string;
+  artist: string;
+  duration?: number;
+}) => {
+  const params = new URLSearchParams({
+    track_name: title,
+    artist_name: artist,
+  });
+
+  if (Number.isFinite(duration)) {
+    params.set("duration", String(Math.round(duration ?? 0)));
+  }
+
+  const response = await fetch(`https://lrclib.net/api/search?${params.toString()}`, {
+    headers: {
+      "accept": "application/json",
+      "user-agent": "MeloMemo/0.1.0 (manual lyrics lookup)",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`LRCLIB lookup failed: ${response.status}`);
+  }
+
+  const tracks = (await response.json()) as LrcLibTrack[];
+  return buildLrcLibLyricCandidates(Array.isArray(tracks) ? tracks : [], duration);
+};
+
+const searchYouTubeCaptionLyrics = async (videoUrl: string) => {
+  const tempRoot = path.join(youtubeRoot, "tmp");
+  const tempDir = path.join(tempRoot, `${Date.now()}-captions`);
+  await mkdir(tempDir, { recursive: true });
+
+  try {
+    await execFileAsync(
+      "yt-dlp",
+      [
+        "--skip-download",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs",
+        "en.*,zh-Hans,zh-Hant,zh.*",
+        "--sub-format",
+        "vtt",
+        "--convert-subs",
+        "vtt",
+        "--no-playlist",
+        "--no-progress",
+        "-o",
+        path.join(tempDir, "captions.%(ext)s"),
+        videoUrl,
+      ],
+      {
+        timeout: 60000,
+        maxBuffer: 1024 * 1024 * 8,
+      },
+    );
+
+    const subtitleFile = await getFileByExtension(tempDir, [".en.vtt", ".en-us.vtt", ".en-gb.vtt", ".vtt"]);
+    if (!subtitleFile) {
+      return [];
+    }
+
+    return parseWebVttLyrics(await readFile(path.join(tempDir, subtitleFile), "utf8"));
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+};
+
+const searchLyricsForDownloadedSong = async ({
+  title,
+  artist,
+  duration,
+  sourceUrl,
+}: {
+  title: string;
+  artist: string;
+  duration?: number;
+  sourceUrl: string;
+}) => {
+  try {
+    const lrcLibLyrics = await searchLrcLibLyrics({ title, artist, duration });
+    if (lrcLibLyrics.length > 0) {
+      return lrcLibLyrics;
+    }
+  } catch (error) {
+    app.log.warn(error, "LRCLIB lyrics lookup failed.");
+  }
+
+  try {
+    return await searchYouTubeCaptionLyrics(sourceUrl);
+  } catch (error) {
+    app.log.warn(error, "YouTube caption lyrics fallback failed.");
+    return [];
+  }
+};
+
+const downloadYouTubeAudio = async ({
+  videoId,
+  fallbackTitle,
+  fallbackArtist,
+  fallbackThumbnailUrl,
+}: {
+  videoId: string;
+  fallbackTitle?: string;
+  fallbackArtist?: string;
+  fallbackThumbnailUrl?: string;
+}) => {
+  const tempRoot = path.join(youtubeRoot, "tmp");
+  const tempDir = path.join(tempRoot, `${Date.now()}-${videoId}`);
+  await mkdir(tempDir, { recursive: true });
+
+  try {
+    const outputTemplate = path.join(tempDir, "download.%(ext)s");
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const videoInfo = await getYouTubeInfo(videoUrl);
+    const identity = getSongIdentity({
+      title: fallbackTitle || videoInfo.title,
+      artist: fallbackArtist || videoInfo.uploader || videoInfo.channel,
+    });
+    const safeSongName = sanitizeFileName(identity.title || fallbackTitle || "youtube-song");
+    const safeFolderName = sanitizeFileName(`${identity.title || fallbackTitle || "youtube-song"}-${videoId}`);
+    const finalDir = path.join(youtubeRoot, safeFolderName);
+    await mkdir(finalDir, { recursive: true });
+
+    await execFileAsync(
+      "yt-dlp",
+      [
+        "--no-playlist",
+        "--extract-audio",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "0",
+        "--write-thumbnail",
+        "--convert-thumbnails",
+        "jpg",
+        "--embed-metadata",
+        "--no-progress",
+        "-o",
+        outputTemplate,
+        videoUrl,
+      ],
+      {
+        timeout: 180000,
+        maxBuffer: 1024 * 1024 * 8,
+      },
+    );
+
+    const audioFile = await getFileByExtension(tempDir, [".mp3"]);
+    if (!audioFile) {
+      throw new Error("没有生成 MP3 文件。");
+    }
+
+    const coverFile = await getFileByExtension(tempDir, [".jpg", ".jpeg", ".png", ".webp"]);
+    const finalAudioName = `${safeSongName}.mp3`;
+    const finalCoverName = coverFile ? `${safeSongName}${path.extname(coverFile).toLowerCase() || ".jpg"}` : undefined;
+    const finalLyricsName = `${safeSongName}.lyrics.json`;
+
+    await rename(path.join(tempDir, audioFile), path.join(finalDir, finalAudioName));
+    if (coverFile && finalCoverName) {
+      await rename(path.join(tempDir, coverFile), path.join(finalDir, finalCoverName));
+    }
+    const coverUrl = finalCoverName
+      ? buildYouTubeUploadUrl(safeFolderName, finalCoverName)
+      : await downloadRemoteCover(fallbackThumbnailUrl, finalDir, safeFolderName, safeSongName);
+
+    return {
+      title: identity.title,
+      artist: identity.artist,
+      duration: Number.isFinite(videoInfo.duration) ? Number(videoInfo.duration) : undefined,
+      audioUrl: buildYouTubeUploadUrl(safeFolderName, finalAudioName),
+      coverUrl,
+      lyricsUrl: buildYouTubeUploadUrl(safeFolderName, finalLyricsName),
+      lyricsFilePath: path.join(finalDir, finalLyricsName),
+      sourceUrl: videoUrl,
+    };
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+};
 
 const parseCsvLine = (line: string) => {
   const cells: string[] = [];
@@ -453,6 +1363,39 @@ const lookupDictionaryApi = async (word: string): Promise<Partial<DictionaryEntr
   };
 };
 
+const recordWordLookup = async (userId: string, entry: DictionaryLookupResult) => {
+  await prisma.userWordLookup.upsert({
+    where: {
+      userId_word: {
+        userId,
+        word: entry.word,
+      },
+    },
+    update: {
+      phonetic: entry.phonetic,
+      usPhonetic: entry.usPhonetic,
+      ukPhonetic: entry.ukPhonetic,
+      partOfSpeech: entry.partOfSpeech,
+      meaning: entry.meaning,
+      lookupCount: {
+        increment: 1,
+      },
+      lastLookedUpAt: new Date(),
+    },
+    create: {
+      userId,
+      word: entry.word,
+      phonetic: entry.phonetic,
+      usPhonetic: entry.usPhonetic,
+      ukPhonetic: entry.ukPhonetic,
+      partOfSpeech: entry.partOfSpeech,
+      meaning: entry.meaning,
+      lookupCount: 1,
+      lastLookedUpAt: new Date(),
+    },
+  });
+};
+
 const buildXfYunAuthUrl = () => {
   const host = "tts-api.xfyun.cn";
   const requestPath = "/v2/tts";
@@ -601,13 +1544,44 @@ const normalizeSong = (song: {
   audioUrl: string;
   coverUrl: string | null;
   lyrics: string;
+  lyricsUrl?: string | null;
+  sourceType?: string;
+  sourceUrl?: string | null;
+  externalId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }) => ({
   ...song,
   coverUrl: song.coverUrl ?? undefined,
+  lyricsUrl: song.lyricsUrl ?? undefined,
+  sourceUrl: song.sourceUrl ?? undefined,
+  externalId: song.externalId ?? undefined,
   lyrics: JSON.parse(song.lyrics),
 });
+
+const buildLocalSongSearchResult = (song: Parameters<typeof normalizeSong>[0]) => {
+  const normalizedSong = normalizeSong(song);
+  return {
+    id: `local:${song.id}`,
+    title: song.title,
+    channelTitle: song.artist,
+    description: "本地曲库",
+    thumbnailUrl: song.coverUrl ?? undefined,
+    url: song.sourceUrl ?? song.audioUrl,
+    sourceType: "local" as const,
+    song: normalizedSong,
+  };
+};
+
+const writeSongLyricsFile = async (lyricsUrl: string | undefined | null, lyrics: LyricLine[]) => {
+  const lyricsFilePath = uploadUrlToFilePath(lyricsUrl ?? undefined);
+  if (!lyricsFilePath) {
+    return;
+  }
+
+  await mkdir(path.dirname(lyricsFilePath), { recursive: true });
+  await writeFile(lyricsFilePath, JSON.stringify(lyrics, null, 2), "utf8");
+};
 
 const normalizeFavoriteSong = (favorite: {
   id: string;
@@ -670,6 +1644,69 @@ app.post<{ Body: AuthPayload }>("/api/auth/login", async (request, reply) => {
   return { user: publicUser(user) };
 });
 
+app.post("/api/auth/wechat/qr", async () => {
+  const id = randomBytes(16).toString("hex");
+  const code = randomBytes(3).toString("hex").toUpperCase();
+  const now = Date.now();
+  const redirectUri = process.env.WECHAT_REDIRECT_URI || "http://localhost:5175/api/auth/wechat/callback";
+  const authUrl = process.env.WECHAT_APP_ID
+    ? `https://open.weixin.qq.com/connect/qrconnect?${new URLSearchParams({
+        appid: process.env.WECHAT_APP_ID,
+        redirect_uri: redirectUri,
+        response_type: "code",
+        scope: "snsapi_login",
+        state: id,
+      }).toString()}#wechat_redirect`
+    : `melomemo://wechat-login?${new URLSearchParams({ sessionId: id, code }).toString()}`;
+  const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?${new URLSearchParams({
+    size: "220x220",
+    margin: "12",
+    data: authUrl,
+  }).toString()}`;
+  const session: WechatLoginSession = {
+    id,
+    code,
+    expiresAt: now + 5 * 60 * 1000,
+    confirmedAt: now + 3200,
+  };
+
+  wechatLoginSessions.set(id, session);
+
+  return {
+    sessionId: id,
+    code,
+    authUrl,
+    qrImageUrl,
+    expiresAt: new Date(session.expiresAt).toISOString(),
+  };
+});
+
+app.get<{ Querystring: WechatCheckQuery }>("/api/auth/wechat/check", async (request, reply) => {
+  const sessionId = request.query.sessionId;
+  const session = sessionId ? wechatLoginSessions.get(sessionId) : null;
+
+  if (!session) {
+    return reply.code(404).send({ message: "二维码已失效，请刷新后重试。" });
+  }
+
+  if (Date.now() > session.expiresAt) {
+    wechatLoginSessions.delete(session.id);
+    return reply.code(410).send({ message: "二维码已过期，请刷新后重试。" });
+  }
+
+  if (Date.now() < session.confirmedAt) {
+    return { status: "pending" };
+  }
+
+  const user = await ensureWechatDemoUser(session);
+  wechatLoginSessions.delete(session.id);
+
+  return {
+    status: "confirmed",
+    user: publicUser(user),
+  };
+});
+
 app.get("/api/auth/me", async (request) => {
   const user = await getRequestUser(request);
   return { user: publicUser(user) };
@@ -678,21 +1715,11 @@ app.get("/api/auth/me", async (request) => {
 app.get("/api/profile", async (request) => {
   const user = await getRequestUser(request);
   const profile = await ensureUserProfile(user.id);
-  const favoriteSongCount = await prisma.userFavoriteSong.count({
-    where: { userId: user.id },
-  });
-  const masteredWords = await prisma.vocabularyWord.count({
-    where: { userId: user.id },
-  });
+  const stats = await buildStudyStats(user.id, profile.conqueredSentences);
 
   return {
     user: publicUser(user),
-    stats: {
-      cumulativeDays: profile.cumulativeDays,
-      masteredWords: Math.max(profile.masteredWords, masteredWords),
-      conqueredSentences: profile.conqueredSentences,
-      favoriteSongs: favoriteSongCount,
-    },
+    stats,
   };
 });
 
@@ -720,24 +1747,65 @@ app.patch<{ Body: ProfilePayload }>("/api/profile", async (request) => {
       update: profileUpdate,
       create: {
         userId: user.id,
-        cumulativeDays: profileUpdate.cumulativeDays ?? 128,
-        masteredWords: profileUpdate.masteredWords ?? 1450,
-        conqueredSentences: profileUpdate.conqueredSentences ?? 320,
+        cumulativeDays: profileUpdate.cumulativeDays ?? 0,
+        masteredWords: profileUpdate.masteredWords ?? 0,
+        conqueredSentences: profileUpdate.conqueredSentences ?? 0,
       },
     }),
   ]);
-  const favoriteSongCount = await prisma.userFavoriteSong.count({
-    where: { userId: user.id },
-  });
+  const stats = await buildStudyStats(user.id, profile.conqueredSentences);
 
   return {
     user: publicUser(updatedUser),
-    stats: {
-      cumulativeDays: profile.cumulativeDays,
-      masteredWords: profile.masteredWords,
-      conqueredSentences: profile.conqueredSentences,
-      favoriteSongs: favoriteSongCount,
+    stats,
+  };
+});
+
+app.post<{ Body: StudyHeartbeatPayload }>("/api/study/heartbeat", async (request) => {
+  const user = await getRequestUser(request);
+  const seconds = normalizeStudySeconds(request.body.seconds);
+  const dateKey = isValidDateKey(request.body.dateKey) ? request.body.dateKey as string : getStudyDateKey();
+  const songKey = request.body.songId?.trim() || request.body.songTitle?.trim();
+  const existing = await prisma.userStudyDay.findUnique({
+    where: {
+      userId_dateKey: {
+        userId: user.id,
+        dateKey,
+      },
     },
+  });
+  const learnedSongIds = new Set(existing ? parseStudySongIds(existing.learnedSongIds) : []);
+
+  if (songKey) {
+    learnedSongIds.add(songKey);
+  }
+
+  if (existing) {
+    await prisma.userStudyDay.update({
+      where: { id: existing.id },
+      data: {
+        totalSeconds: {
+          increment: seconds,
+        },
+        learnedSongIds: JSON.stringify(Array.from(learnedSongIds)),
+        lastStudiedAt: new Date(),
+      },
+    });
+  } else {
+    await prisma.userStudyDay.create({
+      data: {
+        userId: user.id,
+        dateKey,
+        totalSeconds: seconds,
+        learnedSongIds: JSON.stringify(Array.from(learnedSongIds)),
+        lastStudiedAt: new Date(),
+      },
+    });
+  }
+
+  const profile = await ensureUserProfile(user.id);
+  return {
+    stats: await buildStudyStats(user.id, profile.conqueredSentences),
   };
 });
 
@@ -757,11 +1825,266 @@ app.get("/api/songs", async (request) => {
     where: { userId: user.id },
     orderBy: { createdAt: "desc" },
   });
+  const availableSongs = await pruneMissingSongFiles(songs);
 
-  return { songs: songs.map(normalizeSong) };
+  return { songs: availableSongs.map(normalizeSong) };
+});
+
+app.delete<{ Params: { id: string } }>("/api/songs/:id", async (request, reply) => {
+  const user = await getRequestUser(request);
+  const song = await prisma.song.findFirst({
+    where: {
+      id: request.params.id,
+      userId: user.id,
+    },
+  });
+
+  if (!song) {
+    return reply.code(404).send({ message: "歌曲不存在或无权删除。" });
+  }
+
+  await prisma.$transaction([
+    prisma.userFavoriteSong.deleteMany({ where: { songId: song.id } }),
+    prisma.song.delete({ where: { id: song.id } }),
+  ]);
+  await removeSongStoredFiles(song);
+
+  return reply.code(204).send();
+});
+
+app.get<{ Querystring: { title?: string; artist?: string; duration?: string } }>("/api/lyrics/search", async (request, reply) => {
+  const title = normalizeSearchQuery(request.query.title);
+  const artist = normalizeSearchQuery(request.query.artist);
+  const duration = Number(request.query.duration);
+
+  if (!title || !artist) {
+    return reply.code(400).send({ message: "歌曲名和歌手名都需要填写。" });
+  }
+
+  try {
+    const candidates = await searchLrcLibLyricCandidates({
+      title,
+      artist,
+      duration: Number.isFinite(duration) ? duration : undefined,
+    });
+
+    return {
+      results: candidates,
+      source: "lrclib",
+    };
+  } catch (error) {
+    request.log.error(error);
+    return reply.code(502).send({
+      message: "歌词搜索暂时不可用，请稍后再试。",
+      source: "lrclib",
+    });
+  }
+});
+
+app.get<{ Querystring: { q?: string } }>("/api/youtube/search", async (request, reply) => {
+  try {
+    const query = normalizeSearchQuery(request.query.q);
+
+    if (!query) {
+      return reply.code(400).send({ message: "请输入要搜索的歌曲名。" });
+    }
+
+    const user = await getRequestUser(request);
+    const localSongs = await prisma.song.findMany({
+      where: {
+        userId: user.id,
+        OR: [
+          { title: { contains: query } },
+          { artist: { contains: query } },
+        ],
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 10,
+    });
+
+    const availableLocalSongs = await pruneMissingSongFiles(localSongs);
+
+    if (availableLocalSongs.length > 0) {
+      return {
+        results: availableLocalSongs.map(buildLocalSongSearchResult),
+        source: "local-library",
+      };
+    }
+
+    const apiKey = process.env.YOUTUBE_API_KEY || process.env.GOOGLE_API_KEY;
+
+    if (!apiKey) {
+      try {
+        return { results: await searchYouTubePage(query), source: "youtube-page" };
+      } catch (error) {
+        request.log.error(error);
+        return reply.code(502).send({
+          message: "YouTube 搜索暂时不可用。配置 YOUTUBE_API_KEY 后可使用官方搜索接口。",
+          source: "youtube-page",
+        });
+      }
+    }
+
+    const params = new URLSearchParams({
+      part: "snippet",
+      type: "video",
+      videoCategoryId: "10",
+      maxResults: String(YOUTUBE_SEARCH_LIMIT),
+      q: `${query} song`,
+      key: apiKey,
+    });
+
+    const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params.toString()}`);
+    const data = (await response.json().catch(() => null)) as YouTubeSearchResponse & { error?: { message?: string } } | null;
+
+    if (!response.ok) {
+      return reply.code(response.status >= 500 ? 502 : response.status).send({
+        message: data?.error?.message || "YouTube 搜索暂时不可用。",
+        source: "youtube-data-api",
+      });
+    }
+
+    const results = (data?.items ?? [])
+      .map((item) => {
+        const videoId = item.id?.videoId;
+        const snippet = item.snippet;
+
+        if (!videoId || !snippet?.title) {
+          return null;
+        }
+
+        return {
+          id: videoId,
+          title: snippet.title,
+          channelTitle: snippet.channelTitle ?? "YouTube",
+          description: snippet.description ?? "",
+          publishedAt: snippet.publishedAt,
+          thumbnailUrl:
+            snippet.thumbnails?.high?.url ||
+            snippet.thumbnails?.medium?.url ||
+            snippet.thumbnails?.default?.url,
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+        };
+      })
+      .filter(Boolean);
+
+    return { results, source: "youtube-data-api" };
+  } catch (error) {
+    request.log.error(error);
+    try {
+      const fallbackQuery = normalizeSearchQuery(request.query.q);
+      return { results: await searchYouTubePage(fallbackQuery), source: "youtube-page" };
+    } catch (fallbackError) {
+      request.log.error(fallbackError);
+      return reply.code(502).send({
+        message: "连接 YouTube 搜索失败，请稍后再试。",
+        source: "youtube-page",
+      });
+    }
+  }
+});
+
+app.post<{ Body: YouTubeDownloadPayload }>("/api/youtube/download", async (request, reply) => {
+  const user = await getRequestUser(request);
+  const videoId = normalizeYouTubeVideoId(request.body.videoId);
+
+  if (!videoId) {
+    return reply.code(400).send({ message: "videoId is required" });
+  }
+
+  const existingSong = await prisma.song.findFirst({
+    where: {
+      userId: user.id,
+      sourceType: "youtube",
+      externalId: videoId,
+    },
+  });
+
+  if (existingSong) {
+    return { song: normalizeSong(existingSong), reused: true };
+  }
+
+  let downloaded:
+    | {
+        title: string;
+        artist: string;
+        duration?: number;
+        audioUrl: string;
+        coverUrl?: string;
+        lyricsUrl: string;
+        lyricsFilePath: string;
+        sourceUrl: string;
+      }
+    | undefined;
+
+  try {
+    downloaded = await downloadYouTubeAudio({
+      videoId,
+      fallbackTitle: request.body.title,
+      fallbackArtist: request.body.channelTitle,
+      fallbackThumbnailUrl: request.body.thumbnailUrl,
+    });
+    const lyrics = await searchLyricsForDownloadedSong({
+      title: downloaded.title,
+      artist: downloaded.artist,
+      duration: downloaded.duration,
+      sourceUrl: downloaded.sourceUrl,
+    });
+    await writeFile(downloaded.lyricsFilePath, JSON.stringify(lyrics, null, 2), "utf8");
+
+    const song = await prisma.song.create({
+      data: {
+        userId: user.id,
+        title: downloaded.title,
+        artist: downloaded.artist,
+        audioUrl: downloaded.audioUrl,
+        coverUrl: downloaded.coverUrl,
+        lyrics: JSON.stringify(lyrics),
+        lyricsUrl: downloaded.lyricsUrl,
+        sourceType: "youtube",
+        sourceUrl: downloaded.sourceUrl,
+        externalId: videoId,
+      },
+    });
+
+    return reply.code(201).send({ song: normalizeSong(song), reused: false });
+  } catch (error) {
+    await removeUploadUrl(downloaded?.audioUrl);
+    await removeUploadUrl(downloaded?.coverUrl);
+    await removeUploadUrl(downloaded?.lyricsUrl);
+    request.log.error(error);
+    return reply.code(502).send({
+      message: error instanceof Error ? `下载 YouTube 音频失败：${error.message}` : "下载 YouTube 音频失败。",
+    });
+  }
+});
+
+app.get("/api/word-lookups", async (request) => {
+  const user = await getRequestUser(request);
+  const words = await prisma.userWordLookup.findMany({
+    where: { userId: user.id },
+    orderBy: [
+      { lookupCount: "desc" },
+      { lastLookedUpAt: "desc" },
+    ],
+  });
+
+  return {
+    words: words.map((item) => ({
+      word: item.word,
+      phonetic: item.usPhonetic || item.phonetic || undefined,
+      usPhonetic: item.usPhonetic || undefined,
+      ukPhonetic: item.ukPhonetic || undefined,
+      partOfSpeech: item.partOfSpeech || undefined,
+      meaning: item.meaning,
+      lookupCount: item.lookupCount,
+      lastLookedUpAt: item.lastLookedUpAt.toISOString(),
+    })),
+  };
 });
 
 app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, reply) => {
+  const user = await getRequestUser(request);
   const word = normalizeDictionaryWord(request.params.word);
 
   if (!word) {
@@ -771,8 +2094,7 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
   const localEntry = localDictionary.get(word);
   if (localEntry) {
     const onlineEntry = await lookupDictionaryApi(word).catch(() => null);
-
-    return {
+    const result: DictionaryLookupResult = {
       ...localEntry,
       phonetic: onlineEntry?.phonetic || localEntry.phonetic,
       usPhonetic: onlineEntry?.usPhonetic || localEntry.phonetic,
@@ -786,12 +2108,14 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
         accent: "American English",
       },
     };
+
+    await recordWordLookup(user.id, result);
+    return result;
   }
 
   try {
     const onlineEntry = await lookupDictionaryApi(word);
-
-    return {
+    const result: DictionaryLookupResult = {
       word: onlineEntry.word ?? word,
       phonetic: onlineEntry.phonetic,
       usPhonetic: onlineEntry.usPhonetic,
@@ -800,13 +2124,16 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
       meaning: onlineEntry.meaning ?? "No definition found.",
       enMeaning: onlineEntry.enMeaning,
       example: onlineEntry.example,
-      source: onlineEntry.source,
+      source: onlineEntry.source || "Free Dictionary API",
       pronunciation: {
         engine: "科大讯飞在线语音合成 TTS",
         lang: "en-US",
         accent: "American English",
       },
     };
+
+    await recordWordLookup(user.id, result);
+    return result;
   } catch {
     const fallback = fallbackDictionary[word];
 
@@ -816,7 +2143,7 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
       });
     }
 
-    return {
+    const result: DictionaryLookupResult = {
       word,
       ...fallback,
       usPhonetic: fallback.phonetic,
@@ -828,6 +2155,9 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
         accent: "American English",
       },
     };
+
+    await recordWordLookup(user.id, result);
+    return result;
   }
 });
 
@@ -928,6 +2258,7 @@ app.post("/api/songs", async (request, reply) => {
         audioUrl: files.audio.url,
         coverUrl: files.cover?.url,
         lyrics,
+        sourceType: "upload",
       },
     });
 
@@ -938,6 +2269,32 @@ app.post("/api/songs", async (request, reply) => {
       message: error instanceof Error ? error.message : "上传歌曲失败。",
     });
   }
+});
+
+app.patch<{ Params: { id: string }; Body: SongLyricsPayload }>("/api/songs/:id/lyrics", async (request, reply) => {
+  const user = await getRequestUser(request);
+  const lyrics = normalizeLyricsPayload(request.body.lyrics);
+
+  const existingSong = await prisma.song.findFirst({
+    where: {
+      id: request.params.id,
+      userId: user.id,
+    },
+  });
+
+  if (!existingSong) {
+    return reply.code(404).send({ message: "歌曲不存在或无权修改。" });
+  }
+
+  const song = await prisma.song.update({
+    where: { id: existingSong.id },
+    data: {
+      lyrics: JSON.stringify(lyrics),
+    },
+  });
+  await writeSongLyricsFile(song.lyricsUrl, lyrics);
+
+  return { song: normalizeSong(song) };
 });
 
 app.get("/api/favorites", async (request) => {
