@@ -464,6 +464,79 @@ p {
   color: var(--primary);
 }
 
+.upload-studio {
+  margin-top: 56px;
+  padding: 34px;
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 28px;
+  align-items: start;
+  border-radius: 44px;
+  background: var(--surface-card);
+  box-shadow: 0 24px 70px rgba(85, 67, 207, 0.07);
+  backdrop-filter: blur(24px);
+}
+
+.eyebrow.dark {
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.upload-studio h2 {
+  margin-top: 18px;
+  font-size: clamp(2rem, 4vw, 3.4rem);
+  font-weight: 800;
+}
+
+.upload-studio p {
+  margin-top: 14px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.upload-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.upload-form label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.upload-form label:nth-of-type(3),
+.upload-form label:nth-of-type(4),
+.upload-form label:nth-of-type(5),
+.upload-form button,
+.upload-form .form-message {
+  grid-column: 1 / -1;
+}
+
+.upload-form input {
+  width: 100%;
+  min-height: 50px;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 18px;
+  color: var(--text);
+  background: var(--surface-strong);
+  outline: 2px solid transparent;
+}
+
+.upload-form input:focus {
+  outline-color: color-mix(in srgb, var(--primary) 34%, transparent);
+}
+
+.form-message {
+  margin: 0;
+  color: var(--tertiary);
+  font-weight: 700;
+}
+
 .player-view {
   min-height: calc(100vh - 150px);
   display: flex;
@@ -475,6 +548,56 @@ p {
   width: min(760px, 100%);
   margin: 0 auto;
   text-align: center;
+}
+
+.lyric-stage.synced {
+  width: min(880px, 100%);
+}
+
+.synced-lyrics {
+  height: min(58vh, 560px);
+  padding: 30vh 18px;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+  mask-image: linear-gradient(transparent, black 18%, black 82%, transparent);
+}
+
+.synced-lyrics::-webkit-scrollbar {
+  width: 0;
+}
+
+.synced-line {
+  margin: 30px 0;
+  color: var(--muted);
+  font-family: "Plus Jakarta Sans", sans-serif;
+  font-size: clamp(1.55rem, 4vw, 3rem);
+  font-weight: 800;
+  line-height: 1.18;
+  opacity: 0.38;
+  filter: blur(2px);
+  transform: scale(0.94);
+  transition: opacity 220ms ease, filter 220ms ease, transform 220ms ease, color 220ms ease;
+}
+
+.synced-line.active {
+  color: var(--text);
+  opacity: 1;
+  filter: none;
+  transform: scale(1.04);
+}
+
+.local-song-meta {
+  width: fit-content;
+  margin: 18px auto 0;
+  padding: 10px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  font-size: 0.78rem;
+  font-weight: 800;
 }
 
 .lyric {
@@ -1356,7 +1479,9 @@ p {
   .honor-grid,
   .profile-main,
   .profile-stats,
-  .saved-word-grid {
+  .saved-word-grid,
+  .upload-studio,
+  .upload-form {
     grid-template-columns: 1fr;
   }
 

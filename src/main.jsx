@@ -1,9 +1,52 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BarChart, Bar, PolarAngleAxis, PolarGrid, Radar, RadarChart, ResponsiveContainer } from "recharts";
 import { featuredSong, navItems, profileGroups, profileStats, radarData, songs, studyCurve, vocabulary } from "./data";
 import { useMeloStore } from "./store";
 import "./styles.css";
+
+function parseLyrics(rawText) {
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const parsed = lines.flatMap((line, index) => {
+    const matches = [...line.matchAll(/\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g)];
+    const text = line.replace(/\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g, "").trim();
+
+    if (matches.length === 0) {
+      return [{ id: `plain-${index}`, time: index * 4, text: line }];
+    }
+
+    return matches.map((match, matchIndex) => {
+      const minutes = Number(match[1]);
+      const seconds = Number(match[2]);
+      const fraction = Number((match[3] ?? "0").padEnd(3, "0"));
+      return {
+        id: `${index}-${matchIndex}`,
+        time: minutes * 60 + seconds + fraction / 1000,
+        text: text || "♪",
+      };
+    });
+  });
+
+  return parsed.sort((a, b) => a.time - b.time);
+}
+
+async function readTextFile(file) {
+  return file.text();
+}
+
+function formatTime(value) {
+  if (!Number.isFinite(value)) {
+    return "0:00";
+  }
+
+  const minutes = Math.floor(value / 60);
+  const seconds = Math.floor(value % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
 
 function Icon({ name, filled = false }) {
   return <span className={`material-symbols-outlined ${filled ? "filled" : ""}`}>{name}</span>;
@@ -34,6 +77,42 @@ function Header() {
 
 function LibraryView() {
   const setView = useMeloStore((state) => state.setView);
+  const setUploadedSong = useMeloStore((state) => state.setUploadedSong);
+  const [uploadMessage, setUploadMessage] = useState("");
+
+  const handleUpload = async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const audioFile = form.elements.audio.files?.[0];
+    const lyricFile = form.elements.lyrics.files?.[0];
+    const coverFile = form.elements.cover.files?.[0];
+    const title = form.elements.title.value.trim() || audioFile?.name?.replace(/\.[^/.]+$/, "") || "本地歌曲";
+    const artist = form.elements.artist.value.trim() || "Local Artist";
+
+    if (!audioFile || !lyricFile) {
+      setUploadMessage("请选择歌曲文件和歌词文件。");
+      return;
+    }
+
+    const lyricText = await readTextFile(lyricFile);
+    const lyrics = parseLyrics(lyricText);
+
+    if (lyrics.length === 0) {
+      setUploadMessage("歌词文件没有可读取的内容。");
+      return;
+    }
+
+    setUploadedSong({
+      title,
+      artist,
+      audioUrl: URL.createObjectURL(audioFile),
+      coverUrl: coverFile ? URL.createObjectURL(coverFile) : undefined,
+      lyrics,
+    });
+    setUploadMessage("");
+    form.reset();
+  };
+
   return (
     <section className="view">
       <div className="hero">
@@ -65,6 +144,38 @@ function LibraryView() {
           <p>Soundtracks</p>
         </article>
       </div>
+
+      <section className="upload-studio">
+        <div>
+          <span className="eyebrow dark">Local Studio</span>
+          <h2>上传本地歌曲</h2>
+          <p>支持上传音频、LRC/文本歌词和封面图。上传后会进入播放页，歌词会跟随播放进度滚动。</p>
+        </div>
+        <form className="upload-form" onSubmit={handleUpload}>
+          <label>
+            <span>歌曲名称</span>
+            <input name="title" type="text" placeholder="例如：My Song" />
+          </label>
+          <label>
+            <span>歌手</span>
+            <input name="artist" type="text" placeholder="例如：Local Artist" />
+          </label>
+          <label>
+            <span>歌曲文件</span>
+            <input name="audio" type="file" accept="audio/*" />
+          </label>
+          <label>
+            <span>歌词文件</span>
+            <input name="lyrics" type="file" accept=".lrc,.txt,text/plain" />
+          </label>
+          <label>
+            <span>封面图</span>
+            <input name="cover" type="file" accept="image/*" />
+          </label>
+          <button className="primary-btn" type="submit"><Icon name="upload_file" />上传并播放</button>
+          {uploadMessage && <p className="form-message">{uploadMessage}</p>}
+        </form>
+      </section>
     </section>
   );
 }
@@ -95,41 +206,113 @@ function SongCard({ song }) {
 }
 
 function PlayerView() {
-  const { activeWord, isPlaying, isRecording, togglePlaying, toggleRecording, toggleWord, saveWord, savedWords } = useMeloStore();
+  const { activeWord, isPlaying, isRecording, setPlaying, togglePlaying, toggleRecording, toggleWord, saveWord, savedWords, uploadedSong } = useMeloStore();
+  const audioRef = useRef(null);
+  const activeLyricRef = useRef(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(225);
   const isEchoesOpen = activeWord === "echoes";
   const hasEchoes = savedWords.some((item) => item.word === "echoes");
+  const defaultLyrics = useMemo(
+    () => [
+      { id: "prev", time: 0, text: "The mountains are calling me back home" },
+      { id: "active", time: 8, text: "Where the echoes fade away" },
+      { id: "next", time: 16, text: "Searching for a reason to stay" },
+      { id: "far", time: 24, text: "But the wind is blowing cold tonight" },
+    ],
+    [],
+  );
+  const lyricLines = uploadedSong?.lyrics?.length ? uploadedSong.lyrics : defaultLyrics;
+  const activeLineIndex = Math.max(
+    0,
+    lyricLines.findIndex((line, index) => {
+      const nextLine = lyricLines[index + 1];
+      return currentTime >= line.time && (!nextLine || currentTime < nextLine.time);
+    }),
+  );
+
+  useEffect(() => {
+    if (!audioRef.current || !uploadedSong?.audioUrl) {
+      return;
+    }
+
+    if (isPlaying) {
+      audioRef.current.play().catch(() => setPlaying(false));
+    } else {
+      audioRef.current.pause();
+    }
+  }, [isPlaying, setPlaying, uploadedSong?.audioUrl]);
+
+  useEffect(() => {
+    activeLyricRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  }, [activeLineIndex]);
+
   return (
     <section className="view player-view">
-      <div className="lyric-stage">
-        <p className="lyric muted">The mountains are calling me back home</p>
-        <div className="active-lyric">
-          <h1>
-            Where the{" "}
-            <button className={`smart-word ${isEchoesOpen ? "is-open" : ""}`} type="button" aria-expanded={isEchoesOpen} onClick={() => toggleWord("echoes")}>
-              echoes
-            </button>{" "}
-            fade away
-          </h1>
-          {isEchoesOpen && (
-            <aside className="word-popover">
-              <div><span>SmartWord</span><button className="icon-btn tiny" aria-label="发音"><Icon name="volume_up" filled /></button></div>
-              <h2>echoes</h2>
-              <p>/ˈekoʊz/ · n. 回声，共鸣</p>
-              <em>"The walls repeat the echoes of our past."</em>
-              <button className="primary-btn small" onClick={() => saveWord({
-                word: "echoes",
-                phonetic: "/ˈekoʊz/",
-                meaning: "n. 回声，共鸣",
-                example: "The walls repeat the echoes of our past.",
-                sourceSong: "Ethereal Echoes",
-              })}>
-                {hasEchoes ? "已加入" : "加入生词本"}
-              </button>
-            </aside>
-          )}
-        </div>
-        <p className="lyric next">Searching for a reason to stay</p>
-        <p className="lyric far">But the wind is blowing cold tonight</p>
+      {uploadedSong?.audioUrl && (
+        <audio
+          ref={audioRef}
+          src={uploadedSong.audioUrl}
+          onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+          onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 225)}
+          onEnded={() => setPlaying(false)}
+        />
+      )}
+      <div className={`lyric-stage ${uploadedSong ? "synced" : ""}`}>
+        {uploadedSong ? (
+          <div className="synced-lyrics">
+            {lyricLines.map((line, index) => (
+              <p
+                key={line.id}
+                ref={index === activeLineIndex ? activeLyricRef : null}
+                className={`synced-line ${index === activeLineIndex ? "active" : ""}`}
+              >
+                {line.text}
+              </p>
+            ))}
+          </div>
+        ) : (
+          <>
+            <p className="lyric muted">The mountains are calling me back home</p>
+            <div className="active-lyric">
+              <h1>
+                Where the{" "}
+                <button className={`smart-word ${isEchoesOpen ? "is-open" : ""}`} type="button" aria-expanded={isEchoesOpen} onClick={() => toggleWord("echoes")}>
+                  echoes
+                </button>{" "}
+                fade away
+              </h1>
+              {isEchoesOpen && (
+                <aside className="word-popover">
+                  <div><span>SmartWord</span><button className="icon-btn tiny" aria-label="发音"><Icon name="volume_up" filled /></button></div>
+                  <h2>echoes</h2>
+                  <p>/ˈekoʊz/ · n. 回声，共鸣</p>
+                  <em>"The walls repeat the echoes of our past."</em>
+                  <button className="primary-btn small" onClick={() => saveWord({
+                    word: "echoes",
+                    phonetic: "/ˈekoʊz/",
+                    meaning: "n. 回声，共鸣",
+                    example: "The walls repeat the echoes of our past.",
+                    sourceSong: "Ethereal Echoes",
+                  })}>
+                    {hasEchoes ? "已加入" : "加入生词本"}
+                  </button>
+                </aside>
+              )}
+            </div>
+            <p className="lyric next">Searching for a reason to stay</p>
+            <p className="lyric far">But the wind is blowing cold tonight</p>
+          </>
+        )}
+        {uploadedSong && (
+          <div className="local-song-meta">
+            <Icon name="graphic_eq" />
+            <span>本地歌词同步中</span>
+          </div>
+        )}
       </div>
       <div className={`record-widget ${isRecording ? "recording" : ""}`} aria-label="录音练习">
         <div className="wave-stack"><span /><span /><span /><span /><span /></div>
@@ -137,11 +320,15 @@ function PlayerView() {
         <strong>{isRecording ? "正在录音" : "长按录音纠音"}</strong>
       </div>
       <footer className="player-bar">
-        <div className="progress-row"><span>2:14</span><div className="track"><i /></div><span>3:45</span></div>
+        <div className="progress-row">
+          <span>{formatTime(uploadedSong ? currentTime : 134)}</span>
+          <div className="track"><i style={{ width: `${Math.min(100, ((uploadedSong ? currentTime : 146) / duration) * 100)}%` }} /></div>
+          <span>{formatTime(duration)}</span>
+        </div>
         <div className="control-glass">
           <div className="now-playing">
-            <img src="https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=300&q=80" alt="紫粉色抽象专辑封面" />
-            <div><strong>Ethereal Echoes</strong><span>Lyrical Soul</span></div>
+            <img src={uploadedSong?.coverUrl || "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=300&q=80"} alt="当前歌曲封面" />
+            <div><strong>{uploadedSong?.title || "Ethereal Echoes"}</strong><span>{uploadedSong?.artist || "Lyrical Soul"}</span></div>
           </div>
           <div className="transport">
             <button className="icon-btn ghost" aria-label="随机"><Icon name="shuffle" /></button>

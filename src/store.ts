@@ -10,14 +10,31 @@ export type SavedWord = {
   sourceSong?: string;
 };
 
+export type LyricLine = {
+  id: string;
+  time: number;
+  text: string;
+};
+
+export type UploadedSong = {
+  title: string;
+  artist: string;
+  audioUrl: string;
+  coverUrl?: string;
+  lyrics: LyricLine[];
+};
+
 type MeloState = {
   view: ViewId;
   isPlaying: boolean;
   isRecording: boolean;
   activeWord: string | null;
+  uploadedSong: UploadedSong | null;
   savedWords: SavedWord[];
   vocabularyStatus: "idle" | "loading" | "ready" | "error";
   setView: (view: ViewId) => void;
+  setPlaying: (isPlaying: boolean) => void;
+  setUploadedSong: (song: UploadedSong) => void;
   togglePlaying: () => void;
   toggleRecording: () => void;
   toggleWord: (word: string) => void;
@@ -30,9 +47,12 @@ export const useMeloStore = create<MeloState>((set) => ({
   isPlaying: true,
   isRecording: false,
   activeWord: null,
+  uploadedSong: null,
   savedWords: [],
   vocabularyStatus: "idle",
   setView: (view) => set({ view, activeWord: null }),
+  setPlaying: (isPlaying) => set({ isPlaying }),
+  setUploadedSong: (song) => set({ uploadedSong: song, view: "player", isPlaying: true }),
   togglePlaying: () => set((state) => ({ isPlaying: !state.isPlaying })),
   toggleRecording: () => set((state) => ({ isRecording: !state.isRecording })),
   toggleWord: (word) =>
