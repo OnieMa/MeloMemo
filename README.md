@@ -26,3 +26,32 @@ Styling & Components: Stitch (Atomic Design System)
 State Management: Zustand / Redux
 
 Audio Engine: Howler.js / Web Audio API
+
+## 科大讯飞在线语音合成 TTS
+
+点击歌词中的英文单词时，前端会调用本地后端 `POST /api/tts` 获取科大讯飞在线语音合成音频。讯飞密钥只读取服务端环境变量，不会暴露到浏览器。
+
+在 `.env.local` 中配置：
+
+```bash
+XF_APPID=你的讯飞 APPID
+XF_API_KEY=你的讯飞 APIKey
+XF_API_SECRET=你的讯飞 APISecret
+XF_TTS_EN_US_VOICE=catherine
+XF_TTS_EN_GB_VOICE=mary
+XF_TTS_SPEED=42
+XF_TTS_VOLUME=85
+XF_TTS_PITCH=50
+```
+
+后端会用 `tts:<lang>:<voice>:<text>:<speed>:<volume>:<pitch>` 生成缓存键，并将 mp3 缓存在 `server/uploads/tts/`。同一个单词、音色和参数再次请求时会直接复用已生成音频。若讯飞接口失败或未配置环境变量，前端只展示错误提示，不再调用浏览器 `speechSynthesis`。
+
+## 本地英汉词库
+
+MeloMemo 支持使用 [ECDICT](https://github.com/skywind3000/ECDICT) 作为本地英汉词库。词库文件不提交到仓库，首次使用前运行：
+
+```bash
+npm run dict:download
+```
+
+脚本会把完整 `ecdict.csv` 下载到 `server/dictionaries/ecdict.csv`。后端启动时会加载该文件，点击英文单词查询释义时优先使用本地 ECDICT；音标会尽量从在线 `dictionaryapi.dev` 补齐美式和英式两种 IPA。若本地没查到，再回退到在线 `dictionaryapi.dev` 和内置小词典。

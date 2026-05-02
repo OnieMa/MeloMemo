@@ -8,12 +8,84 @@ datasource db {
 }
 
 model VocabularyWord {
+  id           String   @id @default(cuid())
+  userId       String?
+  user         User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  word         String
+  phonetic     String?
+  meaning      String
+  example      String?
+  sourceSong   String?
+  sourceSongId String?
+  sourceTime   Float?
+  sourceLine   String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([userId, word])
+  @@index([userId])
+}
+
+model Song {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  artist    String
+  audioUrl  String
+  coverUrl  String?
+  lyrics    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  favorites UserFavoriteSong[]
+
+  @@index([userId])
+}
+
+model User {
+  id             String             @id @default(cuid())
+  email          String             @unique
+  passwordHash   String
+  displayName    String
+  avatarUrl      String?
+  bio            String             @default("在旋律中寻找灵魂的共鸣")
+  levelTitle     String             @default("LV.4 节奏大师")
+  profile        UserProfile?
+  songs          Song[]
+  vocabulary     VocabularyWord[]
+  favoriteSongs  UserFavoriteSong[]
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+}
+
+model UserProfile {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cumulativeDays     Int      @default(0)
+  masteredWords      Int      @default(0)
+  conqueredSentences Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model UserFavoriteSong {
   id         String   @id @default(cuid())
-  word       String   @unique
-  phonetic   String?
-  meaning    String
-  example    String?
-  sourceSong String?
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  songId     String?
+  song       Song?    @relation(fields: [songId], references: [id], onDelete: SetNull)
+  favoriteKey String
+  title      String
+  artist     String
+  audioUrl   String?
+  coverUrl   String?
+  lyrics     String?
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+
+  @@unique([userId, favoriteKey])
+  @@index([userId])
+  @@index([songId])
 }
