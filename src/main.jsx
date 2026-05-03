@@ -221,6 +221,7 @@ const LONG_PRESS_MS = 550;
 const SEARCH_HISTORY_KEY = "melomemo.youtubeSearchHistory";
 const MAX_SEARCH_HISTORY = 10;
 const YOUTUBE_IFRAME_API_SRC = "https://www.youtube.com/iframe_api";
+const OPEN_LYRICS_SEARCH_EVENT = "melomemo:open-lyrics-search";
 
 function loadYouTubeIframeApi() {
   if (window.YT?.Player) {
@@ -693,6 +694,25 @@ function Header() {
     setLyricArtist((current) => current || uploadedSong?.artist || "");
     setSearchResults([]);
   }, [searchMode, uploadedSong?.artist, uploadedSong?.title]);
+
+  useEffect(() => {
+    const handleOpenLyricsSearch = (event) => {
+      const { title = "", artist = "" } = event.detail ?? {};
+      setSearchOpen(true);
+      setSearchMode("lyrics");
+      setLyricTitle(title);
+      setLyricArtist(artist);
+      setSearchStatus("idle");
+      setSearchMessage("");
+      setSearchSource("");
+      setSearchResults([]);
+      setLyricResults([]);
+      window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    };
+
+    window.addEventListener(OPEN_LYRICS_SEARCH_EVENT, handleOpenLyricsSearch);
+    return () => window.removeEventListener(OPEN_LYRICS_SEARCH_EVENT, handleOpenLyricsSearch);
+  }, []);
 
   const openSearch = () => {
     setSearchOpen(true);
@@ -1427,7 +1447,7 @@ function PlayerView({ showLyrics = true }) {
       artist: uploadedSong?.artist || "Lyrical Soul",
       audioUrl: uploadedSong?.audioUrl,
       coverUrl: uploadedSong?.coverUrl || "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=300&q=80",
-      lyrics: uploadedSong?.lyrics || defaultLyrics,
+      lyrics: uploadedSong ? uploadedSong.lyrics ?? [] : defaultLyrics,
     }),
     [defaultLyrics, uploadedSong],
   );
@@ -1449,12 +1469,21 @@ function PlayerView({ showLyrics = true }) {
     : playbackMode === "repeat-all"
       ? { icon: "repeat", label: "列表循环" }
       : { icon: "arrow_right_alt", label: "顺序播放" };
-  const lyricLines = uploadedSong?.lyrics?.length ? uploadedSong.lyrics : defaultLyrics;
+  const lyricLines = uploadedSong ? uploadedSong.lyrics ?? [] : defaultLyrics;
+  const hasLyrics = lyricLines.length > 0;
   const getActiveLineIndex = (time) => lyricLines.reduce(
     (activeIndex, line, index) => (time >= line.time ? index : activeIndex),
     0,
   );
   const activeLineIndex = getActiveLineIndex(currentTime);
+  const openLyricsSearch = () => {
+    window.dispatchEvent(new CustomEvent(OPEN_LYRICS_SEARCH_EVENT, {
+      detail: {
+        title: uploadedSong?.title || "",
+        artist: uploadedSong?.artist || "",
+      },
+    }));
+  };
   const syncLyricsToTime = (time, behavior = "smooth") => {
     const container = syncedLyricsRef.current;
 
@@ -2282,31 +2311,41 @@ function PlayerView({ showLyrics = true }) {
       <section className="view player-view">
         <div className={`lyric-stage ${uploadedSong ? "synced" : ""}`}>
           {uploadedSong ? (
-            <div className="synced-lyrics" ref={syncedLyricsRef}>
-              {lyricLines.map((line, index) => (
-                <p
-                  key={line.id}
-	                  ref={index === activeLineIndex ? activeLyricRef : null}
-	                  data-lyric-index={index}
-	                  className={`synced-line ${index === activeLineIndex ? "active" : ""}`}
-	                  onContextMenu={(event) => openLyricEditor(event, line, index)}
-	                  onPointerDown={(event) => startLyricLongPress(event, line, index)}
-	                  onPointerMove={clearLyricLongPress}
-	                  onPointerUp={clearLyricLongPress}
-	                  onPointerCancel={clearLyricLongPress}
-	                >
-	                  <button
-	                    className="lyric-jump-zone"
-	                    type="button"
-	                    aria-label={`跳转到 ${formatTime(line.time)}`}
-	                    onClick={() => jumpToLyricLine(line)}
+            hasLyrics ? (
+              <div className="synced-lyrics" ref={syncedLyricsRef}>
+                {lyricLines.map((line, index) => (
+                  <p
+                    key={line.id}
+	                    ref={index === activeLineIndex ? activeLyricRef : null}
+	                    data-lyric-index={index}
+	                    className={`synced-line ${index === activeLineIndex ? "active" : ""}`}
+	                    onContextMenu={(event) => openLyricEditor(event, line, index)}
+	                    onPointerDown={(event) => startLyricLongPress(event, line, index)}
+	                    onPointerMove={clearLyricLongPress}
+	                    onPointerUp={clearLyricLongPress}
+	                    onPointerCancel={clearLyricLongPress}
 	                  >
-	                    <Icon name="play_arrow" filled />
-	                  </button>
-	                  {renderClickableLyric(line.text, line)}
-	                </p>
-              ))}
-            </div>
+	                    <button
+	                      className="lyric-jump-zone"
+	                      type="button"
+	                      aria-label={`跳转到 ${formatTime(line.time)}`}
+	                      onClick={() => jumpToLyricLine(line)}
+	                    >
+	                      <Icon name="play_arrow" filled />
+	                    </button>
+	                    {renderClickableLyric(line.text, line)}
+	                  </p>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-lyrics-state">
+                <button type="button" onClick={openLyricsSearch}>
+                  <Icon name="lyrics" />
+                  <strong>没有歌词</strong>
+                  <span>点击搜索这首歌的歌词</span>
+                </button>
+              </div>
+            )
           ) : (
             <>
             <p className="lyric muted">{renderClickableLyric(defaultLyrics[0].text, defaultLyrics[0])}</p>
