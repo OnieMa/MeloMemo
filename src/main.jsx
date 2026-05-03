@@ -45,8 +45,16 @@ async function readTextFile(file) {
 }
 
 function getCurrentUserHeaders() {
-  const userId = window.localStorage.getItem("melomemo.currentUserId");
-  return userId ? { "x-user-id": userId } : {};
+  const token = window.localStorage.getItem("melomemo.authToken");
+  const expiresAt = window.localStorage.getItem("melomemo.authExpiresAt");
+  if (!token || !expiresAt || Date.parse(expiresAt) <= Date.now()) {
+    window.localStorage.removeItem("melomemo.authToken");
+    window.localStorage.removeItem("melomemo.authExpiresAt");
+    window.localStorage.removeItem("melomemo.currentUserId");
+    return {};
+  }
+
+  return { Authorization: `Bearer ${token}` };
 }
 
 function getFileKind(file) {
@@ -213,7 +221,7 @@ function shouldIgnorePlaybackShortcut(target) {
   }
 
   return Boolean(
-    target.closest("input, textarea, select, button, [contenteditable='true'], [role='textbox']"),
+    target.closest("input, textarea, select, [contenteditable='true'], [role='textbox']"),
   );
 }
 
@@ -1403,7 +1411,7 @@ const playbackRateOptions = [
 ];
 
 function PlayerView({ showLyrics = true }) {
-  const { activeWord, isPlaying, isRecording, currentUser, setPlaying, togglePlaying, toggleRecording, toggleWord, saveWord, savedWords, uploadedSong, localSongs, playbackMode, isShuffle, playNextSong, playPreviousSong, handleSongEnded, togglePlaybackMode, toggleShuffle, pendingSeekTime, consumePendingSeekTime, favoriteSongs, toggleFavoriteSong, recordStudyHeartbeat, loadWordLookupStats, updateSongLyrics } = useMeloStore();
+  const { activeWord, isPlaying, isRecording, currentUser, setPlaying, togglePlaying, toggleRecording, toggleWord, saveWord, savedWords, uploadedSong, localSongs, playbackMode, isShuffle, playNextSong, playPreviousSong, handleSongEnded, togglePlaybackMode, toggleShuffle, pendingSeekTime, consumePendingSeekTime, favoriteSongs, toggleFavoriteSong, recordStudyHeartbeat, loadWordLookupStats, updateSongLyrics, setView } = useMeloStore();
   const audioRef = useRef(null);
   const activeLyricRef = useRef(null);
   const syncedLyricsRef = useRef(null);
@@ -1426,6 +1434,7 @@ function PlayerView({ showLyrics = true }) {
   const [volume, setVolume] = useState(0.7);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [isRateMenuOpen, setRateMenuOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [recordPosition, setRecordPosition] = useState(null);
   const [wordPopover, setWordPopover] = useState(null);
   const [lyricEditor, setLyricEditor] = useState(null);
@@ -1443,18 +1452,18 @@ function PlayerView({ showLyrics = true }) {
   const currentSong = useMemo(
     () => ({
       id: uploadedSong?.id,
-      title: uploadedSong?.title || "Ethereal Echoes",
-      artist: uploadedSong?.artist || "Lyrical Soul",
+      title: uploadedSong?.title || "未选择歌曲",
+      artist: uploadedSong?.artist || "从曲库选择或搜索歌曲",
       audioUrl: uploadedSong?.audioUrl,
-      coverUrl: uploadedSong?.coverUrl || "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&w=300&q=80",
-      lyrics: uploadedSong ? uploadedSong.lyrics ?? [] : defaultLyrics,
+      coverUrl: uploadedSong?.coverUrl,
+      lyrics: uploadedSong ? uploadedSong.lyrics ?? [] : [],
     }),
-    [defaultLyrics, uploadedSong],
+    [uploadedSong],
   );
   const currentSongFavoriteId = currentSong.id
     ? `id:${currentSong.id}`
     : `song:${currentSong.title.trim().toLowerCase()}::${currentSong.artist.trim().toLowerCase()}`;
-  const isCurrentSongFavorite = favoriteSongs.some((song) => song.favoriteId === currentSongFavoriteId);
+  const isCurrentSongFavorite = Boolean(uploadedSong) && favoriteSongs.some((song) => song.favoriteId === currentSongFavoriteId);
   const currentRateLabel = playbackRateOptions.find((option) => option.value === playbackRate)?.label || "1.0x";
   const currentPlaylistIndex = uploadedSong
     ? localSongs.findIndex((song) => (song.id && uploadedSong.id ? song.id === uploadedSong.id : song.title === uploadedSong.title && song.artist === uploadedSong.artist))
@@ -1469,7 +1478,8 @@ function PlayerView({ showLyrics = true }) {
     : playbackMode === "repeat-all"
       ? { icon: "repeat", label: "列表循环" }
       : { icon: "arrow_right_alt", label: "顺序播放" };
-  const lyricLines = uploadedSong ? uploadedSong.lyrics ?? [] : defaultLyrics;
+  const canUseFullscreen = typeof document !== "undefined" && Boolean(document.fullscreenEnabled);
+  const lyricLines = uploadedSong ? uploadedSong.lyrics ?? [] : [];
   const hasLyrics = lyricLines.length > 0;
   const getActiveLineIndex = (time) => lyricLines.reduce(
     (activeIndex, line, index) => (time >= line.time ? index : activeIndex),
@@ -1533,6 +1543,14 @@ function PlayerView({ showLyrics = true }) {
       }
     }
     requestAnimationFrame(() => syncLyricsToTime(nextTime, "smooth"));
+  };
+  const jumpToLyricLineFromRow = (event, line) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest(".lyric-word, .lyric-jump-zone, button")) {
+      return;
+    }
+
+    jumpToLyricLine(line);
   };
 
   const openLyricEditor = (event, line, index) => {
@@ -1614,6 +1632,10 @@ function PlayerView({ showLyrics = true }) {
   };
 
   const startSeeking = (event) => {
+    if (!uploadedSong?.audioUrl) {
+      return;
+    }
+
     isSeekingRef.current = true;
     event.currentTarget.setPointerCapture?.(event.pointerId);
     seekToClientX(event.clientX);
@@ -1646,6 +1668,41 @@ function PlayerView({ showLyrics = true }) {
     if (audioRef.current) {
       audioRef.current.playbackRate = nextRate;
     }
+  };
+
+  const toggleFullscreen = async (event) => {
+    event?.currentTarget?.blur();
+
+    if (!canUseFullscreen) {
+      return;
+    }
+
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    }
+  };
+  const openPlayerFromBar = (event) => {
+    const target = event.target;
+    const isControl = target instanceof Element && target.closest("button, input, select, textarea, [role='slider'], [role='menu'], [contenteditable='true']");
+    if (isControl) {
+      return;
+    }
+
+    setView(showLyrics ? "library" : "player");
+  };
+  const openPlayerFromBarKey = (event) => {
+    if (event.code !== "Enter") {
+      return;
+    }
+
+    event.preventDefault();
+    setView(showLyrics ? "library" : "player");
   };
 
   const restoreSongVolume = () => {
@@ -1890,7 +1947,7 @@ function PlayerView({ showLyrics = true }) {
 
     try {
       const response = await fetch(`/api/dictionary/${encodeURIComponent(word)}`, {
-        headers: currentUser?.id ? { "x-user-id": currentUser.id } : undefined,
+        headers: getCurrentUserHeaders(),
       });
       if (!response.ok) {
         const error = await response.json().catch(() => null);
@@ -2015,12 +2072,8 @@ function PlayerView({ showLyrics = true }) {
   useEffect(() => clearLyricLongPress, []);
 
   useEffect(() => {
-    if (!showLyrics) {
-      return;
-    }
-
     const handleKeyDown = (event) => {
-      if (event.code !== "Space" || event.repeat || shouldIgnorePlaybackShortcut(event.target)) {
+      if (event.code !== "Space" || event.repeat || shouldIgnorePlaybackShortcut(event.target) || !uploadedSong?.audioUrl) {
         return;
       }
 
@@ -2030,7 +2083,7 @@ function PlayerView({ showLyrics = true }) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [showLyrics, togglePlaying]);
+  }, [togglePlaying, uploadedSong?.audioUrl]);
 
   useLayoutEffect(() => {
     if (!wordPopover || !wordPopoverRef.current) {
@@ -2223,6 +2276,20 @@ function PlayerView({ showLyrics = true }) {
   }, []);
 
   useEffect(() => {
+    if (typeof document === "undefined") {
+      return undefined;
+    }
+
+    const syncFullscreenState = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+
+    syncFullscreenState();
+    document.addEventListener("fullscreenchange", syncFullscreenState);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
+  }, []);
+
+  useEffect(() => {
     const placeDefaultRecorder = () => {
       setRecordPosition((position) => {
         if (position?.isCustom) {
@@ -2286,6 +2353,9 @@ function PlayerView({ showLyrics = true }) {
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
   };
+  const displayTime = uploadedSong ? currentTime : 0;
+  const displayDuration = uploadedSong ? duration : 0;
+  const displayProgress = displayDuration > 0 ? Math.min(100, (displayTime / displayDuration) * 100) : 0;
 
   return (
     <>
@@ -2318,12 +2388,14 @@ function PlayerView({ showLyrics = true }) {
                     key={line.id}
 	                    ref={index === activeLineIndex ? activeLyricRef : null}
 	                    data-lyric-index={index}
+	                    style={{ "--lyric-distance": Math.min(4, Math.abs(index - activeLineIndex)) }}
 	                    className={`synced-line ${index === activeLineIndex ? "active" : ""}`}
 	                    onContextMenu={(event) => openLyricEditor(event, line, index)}
 	                    onPointerDown={(event) => startLyricLongPress(event, line, index)}
 	                    onPointerMove={clearLyricLongPress}
 	                    onPointerUp={clearLyricLongPress}
 	                    onPointerCancel={clearLyricLongPress}
+	                    onClick={(event) => jumpToLyricLineFromRow(event, line)}
 	                  >
 	                    <button
 	                      className="lyric-jump-zone"
@@ -2346,42 +2418,7 @@ function PlayerView({ showLyrics = true }) {
                 </button>
               </div>
             )
-          ) : (
-            <>
-            <p className="lyric muted">{renderClickableLyric(defaultLyrics[0].text, defaultLyrics[0])}</p>
-              <div className="active-lyric">
-                <h1>
-                  Where the{" "}
-                  <button className={`smart-word ${isEchoesOpen ? "is-open" : ""}`} type="button" aria-expanded={isEchoesOpen} onClick={() => {
-                    toggleWord("echoes");
-                    void pronounceWord("echoes");
-                  }}>
-                    echoes
-                  </button>{" "}
-                  fade away
-                </h1>
-                {isEchoesOpen && (
-                  <aside className="word-popover" ref={demoWordPopoverRef}>
-                    <div><span>SmartWord</span><button className="icon-btn tiny" aria-label="发音" onClick={() => pronounceWord("echoes")}><Icon name="volume_up" filled /></button></div>
-                    <h2>echoes</h2>
-                    <p>/ˈekoʊz/ · n. 回声，共鸣</p>
-                    <em>"The walls repeat the echoes of our past."</em>
-                    <button className="primary-btn small" onClick={() => saveWord({
-                      word: "echoes",
-                      phonetic: "/ˈekoʊz/",
-                      meaning: "n. 回声，共鸣",
-                      example: "The walls repeat the echoes of our past.",
-                      sourceSong: "Ethereal Echoes",
-                    })}>
-                      {hasEchoes ? "已加入" : "加入生词本"}
-                    </button>
-                  </aside>
-                )}
-              </div>
-            <p className="lyric next">{renderClickableLyric(defaultLyrics[2].text, defaultLyrics[2])}</p>
-            <p className="lyric far">{renderClickableLyric(defaultLyrics[3].text, defaultLyrics[3])}</p>
-          </>
-        )}
+          ) : null}
         </div>
       </section>
       )}
@@ -2489,23 +2526,23 @@ function PlayerView({ showLyrics = true }) {
       </div>
       )}
       <footer className="player-bar">
-        <div className="control-glass">
+        <div className="control-glass player-jump-zone" onClick={openPlayerFromBar} onKeyDown={openPlayerFromBarKey} role="button" tabIndex="0" aria-label={showLyrics ? "返回曲库页面" : "打开歌词掌握页面"}>
           <div className="progress-row">
-            <span>{formatTime(uploadedSong ? currentTime : 134)}</span>
-            <div className="track seekable" ref={progressTrackRef} onPointerDown={startSeeking} role="slider" aria-valuemin="0" aria-valuemax={Math.round(duration)} aria-valuenow={Math.round(uploadedSong ? currentTime : 134)} tabIndex="0">
-              <i style={{ width: `${Math.min(100, ((uploadedSong ? currentTime : 146) / duration) * 100)}%` }} />
-              <b style={{ left: `${Math.min(100, ((uploadedSong ? currentTime : 146) / duration) * 100)}%` }} />
+            <span>{formatTime(displayTime)}</span>
+            <div className={`track seekable ${uploadedSong ? "" : "disabled"}`} ref={progressTrackRef} onPointerDown={startSeeking} role="slider" aria-valuemin="0" aria-valuemax={Math.round(displayDuration)} aria-valuenow={Math.round(displayTime)} tabIndex="0">
+              <i style={{ width: `${displayProgress}%` }} />
+              <b style={{ left: `${displayProgress}%` }} />
             </div>
-            <span>{formatTime(duration)}</span>
+            <span>{formatTime(displayDuration)}</span>
           </div>
           <div className="now-playing">
-            <img src={currentSong.coverUrl} alt="当前歌曲封面" />
+            {currentSong.coverUrl ? <img src={currentSong.coverUrl} alt="当前歌曲封面" /> : <span className="now-playing-placeholder"><Icon name="music_note" /></span>}
             <div><strong>{currentSong.title}</strong><span>{currentSong.artist} · {playlistLabel}</span></div>
           </div>
           <div className="transport">
             <button className={`icon-btn ghost ${isShuffle ? "active-icon" : ""}`} type="button" aria-label={isShuffle ? "关闭随机播放" : "开启随机播放"} aria-pressed={isShuffle} onClick={toggleShuffle} disabled={localSongs.length <= 1}><Icon name="shuffle" /></button>
             <button className="icon-btn ghost" type="button" aria-label="上一首" onClick={playPreviousSong} disabled={localSongs.length === 0}><Icon name="skip_previous" /></button>
-            <button className="play-btn" aria-label={isPlaying ? "暂停" : "播放"} onClick={togglePlaying}><Icon name={isPlaying ? "pause" : "play_arrow"} filled /></button>
+            <button className="play-btn" aria-label={isPlaying ? "暂停" : "播放"} onClick={togglePlaying} disabled={!uploadedSong?.audioUrl}><Icon name={isPlaying ? "pause" : "play_arrow"} filled /></button>
             <button className="icon-btn ghost" type="button" aria-label="下一首" onClick={playNextSong} disabled={localSongs.length === 0}><Icon name="skip_next" /></button>
             <button className={`icon-btn ghost ${playbackMode !== "order" ? "active-icon" : ""}`} type="button" aria-label={playbackModeMeta.label} title={playbackModeMeta.label} onClick={togglePlaybackMode}><Icon name={playbackModeMeta.icon} /></button>
           </div>
@@ -2540,12 +2577,24 @@ function PlayerView({ showLyrics = true }) {
               )}
             </div>
             <button
+              className={`icon-btn ghost fullscreen-btn ${isFullscreen ? "active-icon" : ""}`}
+              type="button"
+              aria-label={isFullscreen ? "退出全屏" : "进入全屏"}
+              aria-pressed={isFullscreen}
+              onClick={toggleFullscreen}
+              title={isFullscreen ? "退出全屏" : "进入全屏"}
+              disabled={!canUseFullscreen}
+            >
+              <Icon name={isFullscreen ? "fullscreen_exit" : "fullscreen"} />
+            </button>
+            <button
               className={`icon-btn ghost favorite-btn ${isCurrentSongFavorite ? "saved" : ""}`}
               type="button"
               aria-label={isCurrentSongFavorite ? "取消收藏当前歌曲" : "收藏当前歌曲"}
               aria-pressed={isCurrentSongFavorite}
-              onClick={() => toggleFavoriteSong(currentSong)}
+              onClick={() => uploadedSong && toggleFavoriteSong(currentSong)}
               title={isCurrentSongFavorite ? "已收藏" : "收藏歌曲"}
+              disabled={!uploadedSong}
             >
               <Icon name="favorite" filled={isCurrentSongFavorite} />
             </button>
@@ -2726,18 +2775,27 @@ function WechatQr({ sessionId, qrImageUrl }) {
 function ProfileLoginView() {
   const { authStatus, authError, loginWithEmail, registerWithEmail, startWechatLogin, checkWechatLogin } = useMeloStore();
   const [mode, setMode] = useState("login");
-  const [form, setForm] = useState({ email: "", password: "", displayName: "" });
+  const [form, setForm] = useState({ email: "", password: "", confirmPassword: "", displayName: "" });
+  const [formError, setFormError] = useState("");
   const [wechatSession, setWechatSession] = useState(null);
   const [wechatMessage, setWechatMessage] = useState("点击刷新二维码后，用微信扫码登录");
 
   const updateField = (event) => {
+    setFormError("");
     setForm((current) => ({ ...current, [event.target.name]: event.target.value }));
   };
 
   const submitEmailAuth = async (event) => {
     event.preventDefault();
+    setFormError("");
+
     if (mode === "login") {
       await loginWithEmail({ email: form.email, password: form.password });
+      return;
+    }
+
+    if (form.password !== form.confirmPassword) {
+      setFormError("两次输入的密码不一致。");
       return;
     }
 
@@ -2757,10 +2815,6 @@ function ProfileLoginView() {
     setWechatSession(session);
     setWechatMessage("二维码已生成，等待微信确认");
   };
-
-  useEffect(() => {
-    refreshWechatQr();
-  }, []);
 
   useEffect(() => {
     if (!wechatSession?.sessionId) {
@@ -2818,7 +2872,13 @@ function ProfileLoginView() {
             密码
             <input name="password" type="password" value={form.password} onChange={updateField} placeholder="至少 6 位" minLength={6} required />
           </label>
-          {authError && <p className="form-message">{authError}</p>}
+          {mode === "register" && (
+            <label>
+              确认密码
+              <input name="confirmPassword" type="password" value={form.confirmPassword} onChange={updateField} placeholder="再次输入密码" minLength={6} required />
+            </label>
+          )}
+          {(formError || authError) && <p className="form-message">{formError || authError}</p>}
           <button className="primary-btn" type="submit" disabled={authStatus === "loading"}>
             <Icon name={mode === "login" ? "login" : "person_add"} />
             {authStatus === "loading" ? "处理中..." : mode === "login" ? "邮箱登录" : "创建账号"}
@@ -2991,16 +3051,24 @@ function App() {
     loadAccountData();
   }, [loadCurrentUser, loadFavoriteSongs, loadLocalSongs, loadProfile, loadSavedWords, loadWordLookupStats]);
 
-  const hasPlayerBar = view === "player" || Boolean(uploadedSong);
+  useEffect(() => {
+    const blurClickedButton = (event) => {
+      const button = event.target instanceof Element ? event.target.closest("button") : null;
+      button?.blur();
+    };
+
+    document.addEventListener("click", blurClickedButton);
+    return () => document.removeEventListener("click", blurClickedButton);
+  }, []);
 
   return (
     <>
       <div className="atmosphere" aria-hidden="true" />
       <Header />
-      <main className={hasPlayerBar ? "with-player-bar" : undefined}>
+      <main className="with-player-bar">
         {view === "library" && <LibraryView />}
         {view === "discover" && <DiscoverView />}
-        {(view === "player" || uploadedSong) && <PlayerView showLyrics={view === "player"} />}
+        <PlayerView showLyrics={view === "player"} />
         {view === "progress" && <ProgressView />}
         {view === "profile" && <ProfileView />}
       </main>

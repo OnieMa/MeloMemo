@@ -43,9 +43,8 @@ const ttsRoot = path.join(uploadRoot, "tts");
 const youtubeRoot = path.join(uploadRoot, "youtube");
 const dictionaryRoot = path.join(projectRoot, "server", "dictionaries");
 const ecdictCsvPath = path.join(dictionaryRoot, "ecdict.csv");
-const DEFAULT_USER_EMAIL = "demo@melomemo.local";
-const DEFAULT_USER_PASSWORD = "melomemo-demo";
 const YOUTUBE_SEARCH_LIMIT = 20;
+const AUTH_SESSION_TTL_DAYS = Number(process.env.AUTH_SESSION_TTL_DAYS ?? 7);
 const execFileAsync = promisify(execFile);
 const wechatLoginSessions = new Map<string, WechatLoginSession>();
 
@@ -122,7 +121,6 @@ type WechatCheckQuery = {
 type WechatLoginSession = {
   id: string;
   expiresAt: number;
-  confirmedAt: number;
   code: string;
 };
 
@@ -274,6 +272,9 @@ app.get("/api/health", async () => ({ ok: true }));
 const getFavoriteKey = (song: { id?: string | null; title: string; artist: string }) =>
   song.id ? `id:${song.id}` : `song:${song.title.trim().toLowerCase()}::${song.artist.trim().toLowerCase()}`;
 
+const isDemoAccountEmail = (email: string) =>
+  email === "demo@melomemo.local" || (email.startsWith("wechat_") && email.endsWith("@melomemo.local"));
+
 const hashPassword = (password: string) => {
   const salt = randomBytes(16).toString("hex");
   const hash = scryptSync(password, salt, 64).toString("hex");
@@ -289,6 +290,25 @@ const verifyPassword = (password: string, passwordHash: string) => {
   const hash = scryptSync(password, salt, 64);
   const saved = Buffer.from(savedHash, "hex");
   return saved.length === hash.length && timingSafeEqual(hash, saved);
+};
+
+const hashAuthToken = (token: string) => createHash("sha256").update(token).digest("hex");
+
+const createAuthSession = async (userId: string) => {
+  const token = randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + AUTH_SESSION_TTL_DAYS * 24 * 60 * 60 * 1000);
+  await prisma.authSession.create({
+    data: {
+      userId,
+      tokenHash: hashAuthToken(token),
+      expiresAt,
+    },
+  });
+
+  return {
+    token,
+    expiresAt: expiresAt.toISOString(),
+  };
 };
 
 const publicUser = (user: {
@@ -307,6 +327,11 @@ const publicUser = (user: {
   levelTitle: user.levelTitle,
 });
 
+const authResponse = async (user: Parameters<typeof publicUser>[0]) => ({
+  user: publicUser(user),
+  session: await createAuthSession(user.id),
+});
+
 const ensureUserProfile = async (userId: string) =>
   prisma.userProfile.upsert({
     where: { userId },
@@ -319,57 +344,44 @@ const ensureUserProfile = async (userId: string) =>
     },
   });
 
-const ensureDefaultUser = async () => {
-  const user = await prisma.user.upsert({
-    where: { email: DEFAULT_USER_EMAIL },
-    update: {},
-    create: {
-      email: DEFAULT_USER_EMAIL,
-      passwordHash: hashPassword(DEFAULT_USER_PASSWORD),
-      displayName: "音律旅人",
-      avatarUrl:
-        "https://lh3.googleusercontent.com/aida-public/AB6AXuBUysvjdILh1cXFtHAS32MsdeoPUxMUQui-iBosnBkTcRUVWczqZBdf4NjfRqwB-oKLn7iXPkERDhTXs4BkURjp-NBtVQxBvSDzGXuiPLUdWNMo37HDg6LQcDtr41Zk2CF73lUXrvLrCzsQvPZk8V6O2Kpgf9hq4FNVCkdtttae7ZW0Q0l3VsZDPKh-zvmv8O6nycuhNQ1jsEVPC8BAUPPwQ2ZwjB6SsDg-bQxyEVX6_5l-IfJpCmpPlqbu-_F2b5mGyQ8rDEHAu3Pb",
-    },
-  });
-  await ensureUserProfile(user.id);
-  return user;
-};
-
-const ensureWechatDemoUser = async (session: WechatLoginSession) => {
-  const email = `wechat_${session.code.toLowerCase()}@melomemo.local`;
-  const user = await prisma.user.upsert({
-    where: { email },
-    update: {
-      displayName: "微信乐友",
-      avatarUrl:
-        "https://images.unsplash.com/photo-1516280440614-37939bbacd81?auto=format&fit=crop&w=300&q=80",
-    },
-    create: {
-      email,
-      passwordHash: hashPassword(randomBytes(18).toString("hex")),
-      displayName: "微信乐友",
-      avatarUrl:
-        "https://images.unsplash.com/photo-1516280440614-37939bbacd81?auto=format&fit=crop&w=300&q=80",
-      bio: "用微信登录，继续在旋律里积累英语记忆",
-    },
-  });
-  await ensureUserProfile(user.id);
-  return user;
-};
-
 const getRequestUser = async (request: { headers: Record<string, string | string[] | undefined> }) => {
-  const userIdHeader = request.headers["x-user-id"];
-  const userId = Array.isArray(userIdHeader) ? userIdHeader[0] : userIdHeader;
+  const authorizationHeader = request.headers.authorization;
+  const authorization = Array.isArray(authorizationHeader) ? authorizationHeader[0] : authorizationHeader;
+  const sessionTokenHeader = request.headers["x-session-token"];
+  const sessionToken = Array.isArray(sessionTokenHeader) ? sessionTokenHeader[0] : sessionTokenHeader;
+  const bearerToken = authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  const token = bearerToken || sessionToken?.trim();
 
-  if (userId) {
-    const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (user) {
-      await ensureUserProfile(user.id);
-      return user;
-    }
+  if (!token) {
+    return null;
   }
 
-  return ensureDefaultUser();
+  const session = await prisma.authSession.findUnique({
+    where: { tokenHash: hashAuthToken(token) },
+    include: { user: true },
+  });
+
+  if (!session || session.expiresAt <= new Date() || isDemoAccountEmail(session.user.email)) {
+    if (session) {
+      await prisma.authSession.delete({ where: { id: session.id } }).catch(() => null);
+    }
+    return null;
+  }
+
+  await ensureUserProfile(session.user.id);
+  return session.user;
+};
+
+const requireRequestUser = async (
+  request: { headers: Record<string, string | string[] | undefined> },
+  reply: { code: (statusCode: number) => { send: (payload: unknown) => unknown } },
+) => {
+  const user = await getRequestUser(request);
+  if (!user) {
+    reply.code(401).send({ message: "请先登录。" });
+    return null;
+  }
+  return user;
 };
 
 const STUDY_TIME_ZONE = process.env.APP_TIME_ZONE || "Asia/Shanghai";
@@ -1609,22 +1621,37 @@ app.post<{ Body: AuthPayload }>("/api/auth/register", async (request, reply) => 
   const password = request.body.password ?? "";
   const displayName = request.body.displayName?.trim() || "音律旅人";
 
-  if (!email || password.length < 6) {
-    return reply.code(400).send({ message: "email and a 6+ character password are required" });
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return reply.code(400).send({ message: "请输入有效的邮箱地址。" });
   }
 
-  const user = await prisma.user.upsert({
-    where: { email },
-    update: { displayName },
-    create: {
-      email,
-      passwordHash: hashPassword(password),
-      displayName,
-    },
-  });
+  if (password.length < 6) {
+    return reply.code(400).send({ message: "密码至少需要 6 位。" });
+  }
+
+  const existingUser = await prisma.user.findUnique({ where: { email } });
+  if (existingUser) {
+    return reply.code(409).send({ message: "这个邮箱已经注册过了，请直接登录。" });
+  }
+
+  let user;
+  try {
+    user = await prisma.user.create({
+      data: {
+        email,
+        passwordHash: hashPassword(password),
+        displayName,
+      },
+    });
+  } catch (error) {
+    if (typeof error === "object" && error && "code" in error && error.code === "P2002") {
+      return reply.code(409).send({ message: "这个邮箱已经注册过了，请直接登录。" });
+    }
+    throw error;
+  }
   await ensureUserProfile(user.id);
 
-  return reply.code(201).send({ user: publicUser(user) });
+  return reply.code(201).send(await authResponse(user));
 });
 
 app.post<{ Body: AuthPayload }>("/api/auth/login", async (request, reply) => {
@@ -1636,28 +1663,44 @@ app.post<{ Body: AuthPayload }>("/api/auth/login", async (request, reply) => {
   }
 
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !verifyPassword(password, user.passwordHash)) {
+  if (!user || isDemoAccountEmail(user.email) || !verifyPassword(password, user.passwordHash)) {
     return reply.code(401).send({ message: "邮箱或密码不正确。" });
   }
 
   await ensureUserProfile(user.id);
-  return { user: publicUser(user) };
+  return authResponse(user);
 });
 
-app.post("/api/auth/wechat/qr", async () => {
+app.post("/api/auth/logout", async (request, reply) => {
+  const authorizationHeader = request.headers.authorization;
+  const authorization = Array.isArray(authorizationHeader) ? authorizationHeader[0] : authorizationHeader;
+  const sessionTokenHeader = request.headers["x-session-token"];
+  const sessionToken = Array.isArray(sessionTokenHeader) ? sessionTokenHeader[0] : sessionTokenHeader;
+  const token = authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || sessionToken?.trim();
+
+  if (token) {
+    await prisma.authSession.deleteMany({ where: { tokenHash: hashAuthToken(token) } });
+  }
+
+  return reply.code(204).send();
+});
+
+app.post("/api/auth/wechat/qr", async (_request, reply) => {
+  if (!process.env.WECHAT_APP_ID) {
+    return reply.code(503).send({ message: "微信登录未配置，请先使用邮箱登录。" });
+  }
+
   const id = randomBytes(16).toString("hex");
   const code = randomBytes(3).toString("hex").toUpperCase();
   const now = Date.now();
   const redirectUri = process.env.WECHAT_REDIRECT_URI || "http://localhost:5175/api/auth/wechat/callback";
-  const authUrl = process.env.WECHAT_APP_ID
-    ? `https://open.weixin.qq.com/connect/qrconnect?${new URLSearchParams({
-        appid: process.env.WECHAT_APP_ID,
-        redirect_uri: redirectUri,
-        response_type: "code",
-        scope: "snsapi_login",
-        state: id,
-      }).toString()}#wechat_redirect`
-    : `melomemo://wechat-login?${new URLSearchParams({ sessionId: id, code }).toString()}`;
+  const authUrl = `https://open.weixin.qq.com/connect/qrconnect?${new URLSearchParams({
+    appid: process.env.WECHAT_APP_ID,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: "snsapi_login",
+    state: id,
+  }).toString()}#wechat_redirect`;
   const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?${new URLSearchParams({
     size: "220x220",
     margin: "12",
@@ -1667,7 +1710,6 @@ app.post("/api/auth/wechat/qr", async () => {
     id,
     code,
     expiresAt: now + 5 * 60 * 1000,
-    confirmedAt: now + 3200,
   };
 
   wechatLoginSessions.set(id, session);
@@ -1694,26 +1736,25 @@ app.get<{ Querystring: WechatCheckQuery }>("/api/auth/wechat/check", async (requ
     return reply.code(410).send({ message: "二维码已过期，请刷新后重试。" });
   }
 
-  if (Date.now() < session.confirmedAt) {
-    return { status: "pending" };
-  }
-
-  const user = await ensureWechatDemoUser(session);
-  wechatLoginSessions.delete(session.id);
-
   return {
-    status: "confirmed",
-    user: publicUser(user),
+    status: "pending",
+    expiresAt: new Date(session.expiresAt).toISOString(),
   };
 });
 
-app.get("/api/auth/me", async (request) => {
-  const user = await getRequestUser(request);
+app.get("/api/auth/me", async (request, reply) => {
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   return { user: publicUser(user) };
 });
 
-app.get("/api/profile", async (request) => {
-  const user = await getRequestUser(request);
+app.get("/api/profile", async (request, reply) => {
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const profile = await ensureUserProfile(user.id);
   const stats = await buildStudyStats(user.id, profile.conqueredSentences);
 
@@ -1723,8 +1764,11 @@ app.get("/api/profile", async (request) => {
   };
 });
 
-app.patch<{ Body: ProfilePayload }>("/api/profile", async (request) => {
-  const user = await getRequestUser(request);
+app.patch<{ Body: ProfilePayload }>("/api/profile", async (request, reply) => {
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const userUpdate = {
     ...(request.body.displayName?.trim() ? { displayName: request.body.displayName.trim() } : {}),
     ...(typeof request.body.avatarUrl === "string" ? { avatarUrl: request.body.avatarUrl.trim() || null } : {}),
@@ -1763,6 +1807,9 @@ app.patch<{ Body: ProfilePayload }>("/api/profile", async (request) => {
 
 app.post<{ Body: StudyHeartbeatPayload }>("/api/study/heartbeat", async (request) => {
   const user = await getRequestUser(request);
+  if (!user) {
+    return { stats: null };
+  }
   const seconds = normalizeStudySeconds(request.body.seconds);
   const dateKey = isValidDateKey(request.body.dateKey) ? request.body.dateKey as string : getStudyDateKey();
   const songKey = request.body.songId?.trim() || request.body.songTitle?.trim();
@@ -1809,8 +1856,11 @@ app.post<{ Body: StudyHeartbeatPayload }>("/api/study/heartbeat", async (request
   };
 });
 
-app.get("/api/vocabulary", async (request) => {
-  const user = await getRequestUser(request);
+app.get("/api/vocabulary", async (request, reply) => {
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const words = await prisma.vocabularyWord.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: "desc" },
@@ -1819,8 +1869,11 @@ app.get("/api/vocabulary", async (request) => {
   return { words };
 });
 
-app.get("/api/songs", async (request) => {
-  const user = await getRequestUser(request);
+app.get("/api/songs", async (request, reply) => {
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const songs = await prisma.song.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: "desc" },
@@ -1831,7 +1884,10 @@ app.get("/api/songs", async (request) => {
 });
 
 app.delete<{ Params: { id: string } }>("/api/songs/:id", async (request, reply) => {
-  const user = await getRequestUser(request);
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const song = await prisma.song.findFirst({
     where: {
       id: request.params.id,
@@ -1890,25 +1946,27 @@ app.get<{ Querystring: { q?: string } }>("/api/youtube/search", async (request, 
     }
 
     const user = await getRequestUser(request);
-    const localSongs = await prisma.song.findMany({
-      where: {
-        userId: user.id,
-        OR: [
-          { title: { contains: query } },
-          { artist: { contains: query } },
-        ],
-      },
-      orderBy: { updatedAt: "desc" },
-      take: 10,
-    });
+    if (user) {
+      const localSongs = await prisma.song.findMany({
+        where: {
+          userId: user.id,
+          OR: [
+            { title: { contains: query } },
+            { artist: { contains: query } },
+          ],
+        },
+        orderBy: { updatedAt: "desc" },
+        take: 10,
+      });
 
-    const availableLocalSongs = await pruneMissingSongFiles(localSongs);
+      const availableLocalSongs = await pruneMissingSongFiles(localSongs);
 
-    if (availableLocalSongs.length > 0) {
-      return {
-        results: availableLocalSongs.map(buildLocalSongSearchResult),
-        source: "local-library",
-      };
+      if (availableLocalSongs.length > 0) {
+        return {
+          results: availableLocalSongs.map(buildLocalSongSearchResult),
+          source: "local-library",
+        };
+      }
     }
 
     const apiKey = process.env.YOUTUBE_API_KEY || process.env.GOOGLE_API_KEY;
@@ -1985,7 +2043,10 @@ app.get<{ Querystring: { q?: string } }>("/api/youtube/search", async (request, 
 });
 
 app.post<{ Body: YouTubeDownloadPayload }>("/api/youtube/download", async (request, reply) => {
-  const user = await getRequestUser(request);
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const videoId = normalizeYouTubeVideoId(request.body.videoId);
 
   if (!videoId) {
@@ -2059,8 +2120,11 @@ app.post<{ Body: YouTubeDownloadPayload }>("/api/youtube/download", async (reque
   }
 });
 
-app.get("/api/word-lookups", async (request) => {
-  const user = await getRequestUser(request);
+app.get("/api/word-lookups", async (request, reply) => {
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const words = await prisma.userWordLookup.findMany({
     where: { userId: user.id },
     orderBy: [
@@ -2109,7 +2173,9 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
       },
     };
 
-    await recordWordLookup(user.id, result);
+    if (user) {
+      await recordWordLookup(user.id, result);
+    }
     return result;
   }
 
@@ -2132,7 +2198,9 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
       },
     };
 
-    await recordWordLookup(user.id, result);
+    if (user) {
+      await recordWordLookup(user.id, result);
+    }
     return result;
   } catch {
     const fallback = fallbackDictionary[word];
@@ -2156,7 +2224,9 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
       },
     };
 
-    await recordWordLookup(user.id, result);
+    if (user) {
+      await recordWordLookup(user.id, result);
+    }
     return result;
   }
 });
@@ -2220,7 +2290,10 @@ app.post<{ Body: TtsPayload }>("/api/tts", async (request, reply) => {
 
 app.post("/api/songs", async (request, reply) => {
   try {
-    const user = await getRequestUser(request);
+    const user = await requireRequestUser(request, reply);
+    if (!user) {
+      return;
+    }
     const parts = request.parts();
     const fields: Record<string, string> = {};
     const files: Record<string, { url: string; filename: string }> = {};
@@ -2272,7 +2345,10 @@ app.post("/api/songs", async (request, reply) => {
 });
 
 app.patch<{ Params: { id: string }; Body: SongLyricsPayload }>("/api/songs/:id/lyrics", async (request, reply) => {
-  const user = await getRequestUser(request);
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const lyrics = normalizeLyricsPayload(request.body.lyrics);
 
   const existingSong = await prisma.song.findFirst({
@@ -2297,8 +2373,11 @@ app.patch<{ Params: { id: string }; Body: SongLyricsPayload }>("/api/songs/:id/l
   return { song: normalizeSong(song) };
 });
 
-app.get("/api/favorites", async (request) => {
-  const user = await getRequestUser(request);
+app.get("/api/favorites", async (request, reply) => {
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const favorites = await prisma.userFavoriteSong.findMany({
     where: { userId: user.id },
     orderBy: { createdAt: "desc" },
@@ -2308,7 +2387,10 @@ app.get("/api/favorites", async (request) => {
 });
 
 app.post<{ Body: FavoriteSongPayload }>("/api/favorites", async (request, reply) => {
-  const user = await getRequestUser(request);
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const title = request.body.title?.trim();
   const artist = request.body.artist?.trim() || "Unknown Artist";
 
@@ -2353,7 +2435,10 @@ app.post<{ Body: FavoriteSongPayload }>("/api/favorites", async (request, reply)
 });
 
 app.delete<{ Params: { favoriteKey: string } }>("/api/favorites/:favoriteKey", async (request, reply) => {
-  const user = await getRequestUser(request);
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const favoriteKey = decodeURIComponent(request.params.favoriteKey);
 
   await prisma.userFavoriteSong.deleteMany({
@@ -2367,7 +2452,10 @@ app.delete<{ Params: { favoriteKey: string } }>("/api/favorites/:favoriteKey", a
 });
 
 app.post<{ Body: VocabularyPayload }>("/api/vocabulary", async (request, reply) => {
-  const user = await getRequestUser(request);
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const word = request.body.word?.trim().toLowerCase();
   const meaning = request.body.meaning?.trim();
   const sourceTimeValue = Number(request.body.sourceTime);
@@ -2412,7 +2500,10 @@ app.post<{ Body: VocabularyPayload }>("/api/vocabulary", async (request, reply) 
 });
 
 app.delete<{ Params: { word: string } }>("/api/vocabulary/:word", async (request, reply) => {
-  const user = await getRequestUser(request);
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
   const word = request.params.word.trim().toLowerCase();
 
   await prisma.vocabularyWord.deleteMany({

@@ -83,7 +83,9 @@ export type WordLookupStat = {
 
 type PlaybackMode = "order" | "repeat-all" | "repeat-one";
 
-const CURRENT_USER_KEY = "melomemo.currentUserId";
+const AUTH_TOKEN_KEY = "melomemo.authToken";
+const AUTH_EXPIRES_AT_KEY = "melomemo.authExpiresAt";
+const LEGACY_CURRENT_USER_KEY = "melomemo.currentUserId";
 const getSongFavoriteId = (song: Pick<FavoriteSong, "id" | "title" | "artist">) =>
   song.id ? `id:${song.id}` : `song:${song.title.trim().toLowerCase()}::${song.artist.trim().toLowerCase()}`;
 
@@ -107,28 +109,43 @@ const getRandomPlaylistIndex = (length: number, currentIndex: number) => {
   return nextIndex;
 };
 
-const readCurrentUserId = () => {
+const readAuthToken = () => {
   if (typeof window === "undefined") {
     return null;
   }
 
-  return window.localStorage.getItem(CURRENT_USER_KEY);
+  const token = window.localStorage.getItem(AUTH_TOKEN_KEY);
+  const expiresAt = window.localStorage.getItem(AUTH_EXPIRES_AT_KEY);
+  if (!token || !expiresAt || Date.parse(expiresAt) <= Date.now()) {
+    clearAuthSession();
+    return null;
+  }
+
+  return token;
 };
 
-const writeCurrentUserId = (userId: string) => {
+const writeAuthSession = (session?: { token?: string; expiresAt?: string }) => {
   if (typeof window === "undefined") {
     return;
   }
 
-  window.localStorage.setItem(CURRENT_USER_KEY, userId);
+  if (!session?.token || !session.expiresAt) {
+    return;
+  }
+
+  window.localStorage.setItem(AUTH_TOKEN_KEY, session.token);
+  window.localStorage.setItem(AUTH_EXPIRES_AT_KEY, session.expiresAt);
+  window.localStorage.removeItem(LEGACY_CURRENT_USER_KEY);
 };
 
-const clearCurrentUserId = () => {
+const clearAuthSession = () => {
   if (typeof window === "undefined") {
     return;
   }
 
-  window.localStorage.removeItem(CURRENT_USER_KEY);
+  window.localStorage.removeItem(AUTH_TOKEN_KEY);
+  window.localStorage.removeItem(AUTH_EXPIRES_AT_KEY);
+  window.localStorage.removeItem(LEGACY_CURRENT_USER_KEY);
 };
 
 const getLocalDateKey = () => {
@@ -139,13 +156,16 @@ const getLocalDateKey = () => {
   return `${year}-${month}-${day}`;
 };
 
-const createHeaders = (userId?: string | null) => ({
+const createAuthHeader = (token = readAuthToken()): Record<string, string> =>
+  token ? { Authorization: `Bearer ${token}` } : {};
+
+const createHeaders = (token?: string | null): Record<string, string> => ({
   "Content-Type": "application/json",
-  ...(userId ? { "x-user-id": userId } : {}),
+  ...createAuthHeader(token),
 });
 
-const createRequestOptions = (userId?: string | null) => ({
-  headers: userId ? { "x-user-id": userId } : undefined,
+const createRequestOptions = (token?: string | null): RequestInit => ({
+  headers: createAuthHeader(token),
 });
 
 type MeloState = {
@@ -226,22 +246,22 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   setView: (view) => set({ view, activeWord: null }),
   setPlaying: (isPlaying) => set({ isPlaying }),
   loadCurrentUser: async () => {
-    const savedUserId = readCurrentUserId();
-    if (!savedUserId) {
+    const savedToken = readAuthToken();
+    if (!savedToken) {
       set({ currentUser: null, authStatus: "idle" });
       return;
     }
 
     try {
-      const response = await fetch("/api/auth/me", createRequestOptions(savedUserId));
+      const response = await fetch("/api/auth/me", createRequestOptions(savedToken));
       if (!response.ok) {
         throw new Error("Failed to load current user");
       }
       const data = await response.json();
-      writeCurrentUserId(data.user.id);
+      writeAuthSession(data.session);
       set({ currentUser: data.user, authStatus: "ready", authError: null });
     } catch {
-      clearCurrentUserId();
+      clearAuthSession();
       set({ currentUser: null, authStatus: "idle" });
     }
   },
@@ -259,7 +279,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         throw new Error(data.message || "登录失败，请稍后重试。");
       }
 
-      writeCurrentUserId(data.user.id);
+      writeAuthSession(data.session);
       set({ currentUser: data.user, authStatus: "ready", authError: null });
       await Promise.all([
         get().loadProfile(),
@@ -288,9 +308,15 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         throw new Error(data.message || "注册失败，请稍后重试。");
       }
 
-      writeCurrentUserId(data.user.id);
+      writeAuthSession(data.session);
       set({ currentUser: data.user, authStatus: "ready", authError: null });
-      await get().loadProfile();
+      await Promise.all([
+        get().loadProfile(),
+        get().loadSavedWords(),
+        get().loadWordLookupStats(),
+        get().loadLocalSongs(),
+        get().loadFavoriteSongs(),
+      ]);
       return true;
     } catch (error) {
       set({ authStatus: "error", authError: error instanceof Error ? error.message : "注册失败，请稍后重试。" });
@@ -328,7 +354,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         return false;
       }
 
-      writeCurrentUserId(data.user.id);
+      writeAuthSession(data.session);
       set({ currentUser: data.user, authStatus: "ready", authError: null });
       await Promise.all([
         get().loadProfile(),
@@ -344,7 +370,14 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }
   },
   logout: () => {
-    clearCurrentUserId();
+    const token = readAuthToken();
+    if (token) {
+      void fetch("/api/auth/logout", {
+        method: "POST",
+        headers: createHeaders(token),
+      }).catch(() => null);
+    }
+    clearAuthSession();
     set({
       currentUser: null,
       profileStats: null,
@@ -357,20 +390,20 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     });
   },
   loadProfile: async () => {
-    const userId = get().currentUser?.id ?? readCurrentUserId();
-    if (!userId) {
+    const token = readAuthToken();
+    if (!token) {
       set({ profileStats: null, profileStatus: "idle" });
       return;
     }
     set({ profileStatus: "loading" });
 
     try {
-      const response = await fetch("/api/profile", createRequestOptions(userId));
+      const response = await fetch("/api/profile", createRequestOptions(token));
       if (!response.ok) {
         throw new Error("Failed to load profile");
       }
       const data = await response.json();
-      writeCurrentUserId(data.user.id);
+      writeAuthSession(data.session);
       set({
         currentUser: data.user,
         profileStats: data.stats,
@@ -413,7 +446,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         : 0;
     const nextSong = localSongs[nextIndex] ?? null;
     if (nextSong) {
-      set({ uploadedSong: nextSong, view: "player", isPlaying: true, pendingSeekTime: null });
+      set({ uploadedSong: nextSong, isPlaying: true, pendingSeekTime: null });
     }
     return nextSong;
   },
@@ -431,7 +464,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         : localSongs.length - 1;
     const previousSong = localSongs[previousIndex] ?? null;
     if (previousSong) {
-      set({ uploadedSong: previousSong, view: "player", isPlaying: true, pendingSeekTime: null });
+      set({ uploadedSong: previousSong, isPlaying: true, pendingSeekTime: null });
     }
     return previousSong;
   },
@@ -488,12 +521,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       uploadedSong: songs[0] ?? state.uploadedSong,
       view: songs.length > 0 ? "player" : state.view,
       isPlaying: songs.length > 0 ? true : state.isPlaying,
-    })),
+  })),
   updateSongLyrics: async (songId, lyrics) => {
-    const userId = get().currentUser?.id ?? readCurrentUserId();
+    const token = readAuthToken();
     const response = await fetch(`/api/songs/${encodeURIComponent(songId)}/lyrics`, {
       method: "PATCH",
-      headers: createHeaders(userId),
+      headers: createHeaders(token),
       body: JSON.stringify({ lyrics }),
     });
     const data = await response.json().catch(() => null);
@@ -517,7 +550,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       return;
     }
 
-    const userId = get().currentUser?.id ?? readCurrentUserId();
+    const token = readAuthToken();
     const favoriteId = getSongFavoriteId(song);
     const wasFavorite = get().favoriteSongs.some((item) => item.favoriteId === favoriteId || item.id === song.id);
     const previousState = {
@@ -540,7 +573,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     try {
       const response = await fetch(`/api/songs/${encodeURIComponent(song.id)}`, {
         method: "DELETE",
-        ...createRequestOptions(userId),
+        ...createRequestOptions(token),
       });
 
       if (!response.ok) {
@@ -553,7 +586,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }
   },
   toggleFavoriteSong: async (song) => {
-    const userId = get().currentUser?.id ?? readCurrentUserId();
+    const token = readAuthToken();
     const favoriteId = getSongFavoriteId(song);
     const isSaved = get().favoriteSongs.some((item) => item.favoriteId === favoriteId);
 
@@ -580,7 +613,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       if (isSaved) {
         const response = await fetch(`/api/favorites/${encodeURIComponent(favoriteId)}`, {
           method: "DELETE",
-          ...createRequestOptions(userId),
+          ...createRequestOptions(token),
         });
         if (!response.ok) {
           throw new Error("Failed to remove favorite");
@@ -588,7 +621,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       } else {
         const response = await fetch("/api/favorites", {
           method: "POST",
-          headers: createHeaders(userId),
+          headers: createHeaders(token),
           body: JSON.stringify(song),
         });
         if (!response.ok) {
@@ -611,10 +644,10 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   },
   isFavoriteSong: (song) => get().favoriteSongs.some((item) => item.favoriteId === getSongFavoriteId(song)),
   loadFavoriteSongs: async () => {
-    const userId = get().currentUser?.id ?? readCurrentUserId();
+    const token = readAuthToken();
 
     try {
-      const response = await fetch("/api/favorites", createRequestOptions(userId));
+      const response = await fetch("/api/favorites", createRequestOptions(token));
       if (!response.ok) {
         throw new Error("Failed to load favorites");
       }
@@ -625,11 +658,11 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }
   },
   loadLocalSongs: async () => {
-    const userId = get().currentUser?.id ?? readCurrentUserId();
+    const token = readAuthToken();
     set({ songsStatus: "loading" });
 
     try {
-      const response = await fetch("/api/songs", createRequestOptions(userId));
+      const response = await fetch("/api/songs", createRequestOptions(token));
       if (!response.ok) {
         throw new Error("Failed to load songs");
       }
@@ -640,12 +673,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }
   },
   recordStudyHeartbeat: async ({ seconds = 0, songId, songTitle }) => {
-    const userId = get().currentUser?.id ?? readCurrentUserId();
+    const token = readAuthToken();
 
     try {
       const response = await fetch("/api/study/heartbeat", {
         method: "POST",
-        headers: createHeaders(userId),
+        headers: createHeaders(token),
         body: JSON.stringify({
           seconds,
           songId,
@@ -669,11 +702,11 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   toggleWord: (word) =>
     set((state) => ({ activeWord: state.activeWord === word ? null : word })),
   loadWordLookupStats: async () => {
-    const userId = get().currentUser?.id ?? readCurrentUserId();
+    const token = readAuthToken();
     set({ wordLookupStatus: "loading" });
 
     try {
-      const response = await fetch("/api/word-lookups", createRequestOptions(userId));
+      const response = await fetch("/api/word-lookups", createRequestOptions(token));
       if (!response.ok) {
         throw new Error("Failed to load word lookup stats");
       }
@@ -684,11 +717,11 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }
   },
   loadSavedWords: async () => {
-    const userId = get().currentUser?.id ?? readCurrentUserId();
+    const token = readAuthToken();
     set({ vocabularyStatus: "loading" });
 
     try {
-      const response = await fetch("/api/vocabulary", createRequestOptions(userId));
+      const response = await fetch("/api/vocabulary", createRequestOptions(token));
       if (!response.ok) {
         throw new Error("Failed to load vocabulary");
       }
@@ -699,7 +732,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }
   },
   saveWord: async (word) => {
-    const userId = get().currentUser?.id ?? readCurrentUserId();
+    const token = readAuthToken();
     set((state) => ({
       savedWords: state.savedWords.some((item) => item.word === word.word)
         ? state.savedWords
@@ -709,7 +742,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     try {
       const response = await fetch("/api/vocabulary", {
         method: "POST",
-        headers: createHeaders(userId),
+        headers: createHeaders(token),
         body: JSON.stringify(word),
       });
       if (!response.ok) {
