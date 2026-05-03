@@ -231,9 +231,14 @@ function loadYouTubeIframeApi() {
     return window.__melomemoYouTubeApiPromise;
   }
 
-  window.__melomemoYouTubeApiPromise = new Promise((resolve) => {
+  window.__melomemoYouTubeApiPromise = new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      reject(new Error("YouTube IFrame API timed out."));
+      window.__melomemoYouTubeApiPromise = null;
+    }, 4500);
     const previousReady = window.onYouTubeIframeAPIReady;
     window.onYouTubeIframeAPIReady = () => {
+      window.clearTimeout(timeout);
       previousReady?.();
       resolve(window.YT);
     };
@@ -242,6 +247,11 @@ function loadYouTubeIframeApi() {
       const script = document.createElement("script");
       script.src = YOUTUBE_IFRAME_API_SRC;
       script.async = true;
+      script.onerror = () => {
+        window.clearTimeout(timeout);
+        window.__melomemoYouTubeApiPromise = null;
+        reject(new Error("YouTube IFrame API failed to load."));
+      };
       document.body.appendChild(script);
     }
   });
@@ -463,6 +473,8 @@ function YouTubePreviewModal({ result, status, progress, onClose, onDownload }) 
   const [isPlaying, setPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
+  const [previewMode, setPreviewMode] = useState("api");
+  const embedUrl = `https://www.youtube.com/embed/${encodeURIComponent(result.id)}?controls=1&rel=0&modestbranding=1&playsinline=1`;
 
   useEffect(() => {
     let disposed = false;
@@ -471,38 +483,46 @@ function YouTubePreviewModal({ result, status, progress, onClose, onDownload }) 
     setPlaying(false);
     setDuration(0);
     setCurrentTime(0);
+    setPreviewMode("api");
 
-    loadYouTubeIframeApi().then((YT) => {
-      if (disposed || !playerHostRef.current) {
-        return;
-      }
+    loadYouTubeIframeApi()
+      .then((YT) => {
+        if (disposed || !playerHostRef.current) {
+          return;
+        }
 
-      playerRef.current = new YT.Player(playerHostRef.current, {
-        videoId: result.id,
-        playerVars: {
-          autoplay: 0,
-          controls: 0,
-          modestbranding: 1,
-          rel: 0,
-        },
-        events: {
-          onReady: (event) => {
-            if (disposed) {
-              return;
-            }
-            setReady(true);
-            setDuration(event.target.getDuration() || 0);
+        playerRef.current = new YT.Player(playerHostRef.current, {
+          videoId: result.id,
+          playerVars: {
+            autoplay: 0,
+            controls: 0,
+            modestbranding: 1,
+            rel: 0,
+            playsinline: 1,
           },
-          onStateChange: (event) => {
-            if (!window.YT?.PlayerState) {
-              return;
+          events: {
+            onReady: (event) => {
+              if (disposed) {
+                return;
+              }
+              setReady(true);
+              setDuration(event.target.getDuration() || 0);
+            },
+            onStateChange: (event) => {
+              if (!window.YT?.PlayerState) {
+                return;
+              }
+              setPlaying(event.data === window.YT.PlayerState.PLAYING);
+              setDuration(event.target.getDuration() || 0);
             }
-            setPlaying(event.data === window.YT.PlayerState.PLAYING);
-            setDuration(event.target.getDuration() || 0);
           },
-        },
+        });
+      })
+      .catch(() => {
+        if (!disposed) {
+          setPreviewMode("iframe");
+        }
       });
-    });
 
     return () => {
       disposed = true;
@@ -527,7 +547,7 @@ function YouTubePreviewModal({ result, status, progress, onClose, onDownload }) 
 
   const togglePreview = () => {
     const player = playerRef.current;
-    if (!player) {
+    if (!player || previewMode !== "api") {
       return;
     }
 
@@ -541,15 +561,26 @@ function YouTubePreviewModal({ result, status, progress, onClose, onDownload }) 
   const seekPreview = (event) => {
     const nextTime = Number(event.target.value);
     setCurrentTime(nextTime);
-    playerRef.current?.seekTo?.(nextTime, true);
+    if (previewMode === "api") {
+      playerRef.current?.seekTo?.(nextTime, true);
+    }
   };
 
   return (
     <div className="youtube-preview-backdrop" role="presentation" onPointerDown={onClose}>
       <section className="youtube-preview-modal" role="dialog" aria-modal="true" aria-label="预览 YouTube 视频" onPointerDown={(event) => event.stopPropagation()}>
         <div className="youtube-preview-player">
-          <div ref={playerHostRef} />
-          {!isReady && (
+          {previewMode === "iframe" ? (
+            <iframe
+              title={result.title}
+              src={embedUrl}
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              allowFullScreen
+            />
+          ) : (
+            <div ref={playerHostRef} />
+          )}
+          {previewMode === "api" && !isReady && (
             <div className="youtube-preview-loading">
               <Icon name="hourglass_top" />
               <span>正在加载预览...</span>
@@ -579,6 +610,9 @@ function YouTubePreviewModal({ result, status, progress, onClose, onDownload }) 
             />
             <span>{formatPreviewTime(duration)}</span>
           </div>
+          {previewMode === "iframe" && (
+            <p className="youtube-preview-fallback">YouTube 预览接口加载较慢，已切换到内嵌播放器；请使用视频画面内的控件预览。</p>
+          )}
           {status === "loading" && (
             <div className="youtube-download-progress" role="status" aria-live="polite">
               <div>
