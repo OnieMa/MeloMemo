@@ -89,6 +89,12 @@ body:has(.youtube-preview-backdrop) .mobile-nav {
   transition: filter 180ms ease, transform 180ms ease;
 }
 
+body:has(.youtube-preview-backdrop) .shell-nav {
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
 body:has(.metadata-dialog-backdrop) main,
 body:has(.metadata-dialog-backdrop) .shell-nav > *:not(.metadata-dialog-backdrop),
 body:has(.metadata-dialog-backdrop) .youtube-preview-modal,
