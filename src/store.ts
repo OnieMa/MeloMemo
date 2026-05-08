@@ -1,5 +1,19 @@
 import { create } from "zustand";
 import type { ViewId } from "./data";
+import {
+  buildLocalProfileStats,
+  deleteLocalSong as deleteLocalSongRecord,
+  listLocalFavorites,
+  listLocalSongs as listLocalSongRecords,
+  listLocalVocabulary,
+  listLocalWordLookups,
+  recordLocalStudyHeartbeat,
+  recordLocalWordLookup as recordLocalWordLookupEntry,
+  removeLocalFavorite,
+  saveLocalFavorite,
+  saveLocalVocabularyWord,
+  updateLocalSongLyrics,
+} from "./localDb";
 
 export type SavedWord = {
   id?: string;
@@ -82,10 +96,19 @@ export type WordLookupStat = {
 };
 
 type PlaybackMode = "order" | "repeat-all" | "repeat-one";
+type AppMode = "local" | "cloud";
 
 const AUTH_TOKEN_KEY = "melomemo.authToken";
 const AUTH_EXPIRES_AT_KEY = "melomemo.authExpiresAt";
 const LEGACY_CURRENT_USER_KEY = "melomemo.currentUserId";
+const localUser: MeloUser = {
+  id: "local",
+  email: "local@melomemo.local",
+  displayName: "本地模式",
+  bio: "数据只保存在这台设备上",
+  levelTitle: "LOCAL",
+};
+
 const getSongFavoriteId = (song: Pick<FavoriteSong, "id" | "title" | "artist">) =>
   song.id ? `id:${song.id}` : `song:${song.title.trim().toLowerCase()}::${song.artist.trim().toLowerCase()}`;
 
@@ -169,6 +192,7 @@ const createRequestOptions = (token?: string | null): RequestInit => ({
 });
 
 type MeloState = {
+  appMode: AppMode;
   view: ViewId;
   isPlaying: boolean;
   isRecording: boolean;
@@ -190,6 +214,7 @@ type MeloState = {
   authStatus: "idle" | "loading" | "ready" | "error";
   authError: string | null;
   setView: (view: ViewId) => void;
+  showCloudLogin: () => void;
   setPlaying: (isPlaying: boolean) => void;
   loadCurrentUser: () => Promise<void>;
   loginWithEmail: (payload: { email: string; password: string }) => Promise<boolean>;
@@ -220,14 +245,16 @@ type MeloState = {
   loadWordLookupStats: () => Promise<void>;
   loadSavedWords: () => Promise<void>;
   saveWord: (word: SavedWord) => Promise<void>;
+  recordWordLookup: (entry: WordLookupStat) => Promise<void>;
 };
 
 export const useMeloStore = create<MeloState>((set, get) => ({
+  appMode: "local",
   view: "library",
   isPlaying: true,
   isRecording: false,
   activeWord: null,
-  currentUser: null,
+  currentUser: localUser,
   profileStats: null,
   uploadedSong: null,
   localSongs: [],
@@ -244,11 +271,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   authStatus: "idle",
   authError: null,
   setView: (view) => set({ view, activeWord: null }),
+  showCloudLogin: () => set({ currentUser: null, authStatus: "idle", authError: null, view: "profile" }),
   setPlaying: (isPlaying) => set({ isPlaying }),
   loadCurrentUser: async () => {
     const savedToken = readAuthToken();
     if (!savedToken) {
-      set({ currentUser: null, authStatus: "idle" });
+      set({ appMode: "local", currentUser: localUser, authStatus: "idle" });
       return;
     }
 
@@ -259,10 +287,10 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       }
       const data = await response.json();
       writeAuthSession(data.session);
-      set({ currentUser: data.user, authStatus: "ready", authError: null });
+      set({ appMode: "cloud", currentUser: data.user, authStatus: "ready", authError: null });
     } catch {
       clearAuthSession();
-      set({ currentUser: null, authStatus: "idle" });
+      set({ appMode: "local", currentUser: localUser, authStatus: "idle" });
     }
   },
   loginWithEmail: async (payload) => {
@@ -280,7 +308,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       }
 
       writeAuthSession(data.session);
-      set({ currentUser: data.user, authStatus: "ready", authError: null });
+      set({ appMode: "cloud", currentUser: data.user, authStatus: "ready", authError: null });
       await Promise.all([
         get().loadProfile(),
         get().loadSavedWords(),
@@ -309,7 +337,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       }
 
       writeAuthSession(data.session);
-      set({ currentUser: data.user, authStatus: "ready", authError: null });
+      set({ appMode: "cloud", currentUser: data.user, authStatus: "ready", authError: null });
       await Promise.all([
         get().loadProfile(),
         get().loadSavedWords(),
@@ -355,7 +383,7 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       }
 
       writeAuthSession(data.session);
-      set({ currentUser: data.user, authStatus: "ready", authError: null });
+      set({ appMode: "cloud", currentUser: data.user, authStatus: "ready", authError: null });
       await Promise.all([
         get().loadProfile(),
         get().loadSavedWords(),
@@ -379,7 +407,8 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }
     clearAuthSession();
     set({
-      currentUser: null,
+      appMode: "local",
+      currentUser: localUser,
       profileStats: null,
       favoriteSongs: [],
       savedWords: [],
@@ -392,7 +421,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   loadProfile: async () => {
     const token = readAuthToken();
     if (!token) {
-      set({ profileStats: null, profileStatus: "idle" });
+      set({ profileStatus: "loading" });
+      try {
+        set({ profileStats: await buildLocalProfileStats(), profileStatus: "ready" });
+      } catch {
+        set({ profileStats: null, profileStatus: "error" });
+      }
       return;
     }
     set({ profileStatus: "loading" });
@@ -524,6 +558,18 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   })),
   updateSongLyrics: async (songId, lyrics) => {
     const token = readAuthToken();
+    if (!token) {
+      const updatedSong = await updateLocalSongLyrics(songId, lyrics);
+      set((state) => ({
+        uploadedSong: state.uploadedSong?.id === updatedSong.id ? updatedSong : state.uploadedSong,
+        localSongs: state.localSongs.map((song) => (song.id === updatedSong.id ? updatedSong : song)),
+        favoriteSongs: state.favoriteSongs.map((song) =>
+          song.id === updatedSong.id ? { ...song, lyrics: updatedSong.lyrics } : song,
+        ),
+      }));
+      return updatedSong;
+    }
+
     const response = await fetch(`/api/songs/${encodeURIComponent(songId)}/lyrics`, {
       method: "PATCH",
       headers: createHeaders(token),
@@ -571,6 +617,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }));
 
     try {
+      if (!token) {
+        await deleteLocalSongRecord(song.id);
+        await get().loadProfile();
+        return;
+      }
+
       const response = await fetch(`/api/songs/${encodeURIComponent(song.id)}`, {
         method: "DELETE",
         ...createRequestOptions(token),
@@ -589,16 +641,17 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     const token = readAuthToken();
     const favoriteId = getSongFavoriteId(song);
     const isSaved = get().favoriteSongs.some((item) => item.favoriteId === favoriteId);
+    const nextFavorite = {
+      ...song,
+      favoriteId,
+      savedAt: new Date().toISOString(),
+    };
 
     set((state) => ({
       favoriteSongs: isSaved
         ? state.favoriteSongs.filter((item) => item.favoriteId !== favoriteId)
         : [
-            {
-              ...song,
-              favoriteId,
-              savedAt: new Date().toISOString(),
-            },
+            nextFavorite,
             ...state.favoriteSongs,
           ],
       profileStats: state.profileStats
@@ -610,6 +663,16 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }));
 
     try {
+      if (!token) {
+        if (isSaved) {
+          await removeLocalFavorite(favoriteId);
+        } else {
+          await saveLocalFavorite(nextFavorite);
+        }
+        await get().loadProfile();
+        return;
+      }
+
       if (isSaved) {
         const response = await fetch(`/api/favorites/${encodeURIComponent(favoriteId)}`, {
           method: "DELETE",
@@ -645,6 +708,10 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   isFavoriteSong: (song) => get().favoriteSongs.some((item) => item.favoriteId === getSongFavoriteId(song)),
   loadFavoriteSongs: async () => {
     const token = readAuthToken();
+    if (!token) {
+      set({ favoriteSongs: await listLocalFavorites() });
+      return;
+    }
 
     try {
       const response = await fetch("/api/favorites", createRequestOptions(token));
@@ -660,6 +727,14 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   loadLocalSongs: async () => {
     const token = readAuthToken();
     set({ songsStatus: "loading" });
+    if (!token) {
+      try {
+        set({ localSongs: await listLocalSongRecords(), songsStatus: "ready" });
+      } catch {
+        set({ songsStatus: "error" });
+      }
+      return;
+    }
 
     try {
       const response = await fetch("/api/songs", createRequestOptions(token));
@@ -674,6 +749,11 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   },
   recordStudyHeartbeat: async ({ seconds = 0, songId, songTitle }) => {
     const token = readAuthToken();
+    if (!token) {
+      await recordLocalStudyHeartbeat({ seconds, songId });
+      set({ profileStats: await buildLocalProfileStats() });
+      return;
+    }
 
     try {
       const response = await fetch("/api/study/heartbeat", {
@@ -704,6 +784,14 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   loadWordLookupStats: async () => {
     const token = readAuthToken();
     set({ wordLookupStatus: "loading" });
+    if (!token) {
+      try {
+        set({ wordLookupStats: await listLocalWordLookups(), wordLookupStatus: "ready" });
+      } catch {
+        set({ wordLookupStatus: "error" });
+      }
+      return;
+    }
 
     try {
       const response = await fetch("/api/word-lookups", createRequestOptions(token));
@@ -719,6 +807,14 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   loadSavedWords: async () => {
     const token = readAuthToken();
     set({ vocabularyStatus: "loading" });
+    if (!token) {
+      try {
+        set({ savedWords: await listLocalVocabulary(), vocabularyStatus: "ready" });
+      } catch {
+        set({ vocabularyStatus: "error" });
+      }
+      return;
+    }
 
     try {
       const response = await fetch("/api/vocabulary", createRequestOptions(token));
@@ -740,6 +836,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     }));
 
     try {
+      if (!token) {
+        await saveLocalVocabularyWord(word);
+        set({ vocabularyStatus: "ready", profileStats: await buildLocalProfileStats() });
+        return;
+      }
+
       const response = await fetch("/api/vocabulary", {
         method: "POST",
         headers: createHeaders(token),
@@ -760,5 +862,13 @@ export const useMeloStore = create<MeloState>((set, get) => ({
     } catch {
       set({ vocabularyStatus: "error" });
     }
+  },
+  recordWordLookup: async (entry) => {
+    const token = readAuthToken();
+    if (token) {
+      return;
+    }
+    await recordLocalWordLookupEntry(entry);
+    set({ wordLookupStats: await listLocalWordLookups() });
   },
 }));

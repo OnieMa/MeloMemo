@@ -47,6 +47,10 @@ const YOUTUBE_SEARCH_LIMIT = 20;
 const AUTH_SESSION_TTL_DAYS = Number(process.env.AUTH_SESSION_TTL_DAYS ?? 7);
 const execFileAsync = promisify(execFile);
 const wechatLoginSessions = new Map<string, WechatLoginSession>();
+const youtubeSearchHeaders = {
+  "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+  "user-agent": "Mozilla/5.0 MeloMemo",
+};
 
 type VocabularyPayload = {
   word?: string;
@@ -699,18 +703,45 @@ const searchYouTubePage = async (query: string) => {
   const params = new URLSearchParams({
     search_query: `${query} song`,
   });
-  const response = await fetch(`https://www.youtube.com/results?${params.toString()}`, {
-    headers: {
-      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-      "user-agent": "Mozilla/5.0 MeloMemo",
-    },
-  });
+  const searchUrl = `https://www.youtube.com/results?${params.toString()}`;
+  let html = "";
 
-  if (!response.ok) {
-    throw new Error(`YouTube search page failed: ${response.status}`);
+  try {
+    const response = await fetch(searchUrl, {
+      headers: youtubeSearchHeaders,
+    });
+
+    if (!response.ok) {
+      throw new Error(`YouTube search page failed: ${response.status}`);
+    }
+
+    html = await response.text();
+  } catch (error) {
+    const proxyUrl = process.env.YOUTUBE_SEARCH_PROXY?.trim();
+
+    if (!proxyUrl) {
+      throw error;
+    }
+
+    const { stdout } = await execFileAsync("curl", [
+      "-fsSL",
+      "--compressed",
+      "--max-time",
+      "20",
+      "--proxy",
+      proxyUrl,
+      "-A",
+      youtubeSearchHeaders["user-agent"],
+      "-H",
+      `accept-language: ${youtubeSearchHeaders["accept-language"]}`,
+      searchUrl,
+    ], {
+      maxBuffer: 12 * 1024 * 1024,
+    });
+    html = stdout;
   }
 
-  const data = findYouTubeInitialData(await response.text());
+  const data = findYouTubeInitialData(html);
   const results: YouTubeSearchResult[] = [];
   collectYouTubeRenderers(data, results);
   return results;

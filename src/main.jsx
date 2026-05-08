@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { createRoot } from "react-dom/client";
 import { BarChart, Bar, PolarAngleAxis, PolarGrid, Radar, RadarChart, ResponsiveContainer } from "recharts";
 import { featuredSong, navItems, profileGroups, profileStats, radarData, songs, studyCurve } from "./data";
+import { saveLocalSongDraft } from "./localDb";
 import { useMeloStore } from "./store";
 import "./styles.css";
 
@@ -139,7 +140,11 @@ async function buildSongsFromFiles(files) {
   return { songs, skipped };
 }
 
-async function uploadSongDraft(song) {
+async function uploadSongDraft(song, appMode) {
+  if (appMode === "local") {
+    return saveLocalSongDraft(song);
+  }
+
   const formData = new FormData();
   formData.append("title", song.title);
   formData.append("artist", song.artist);
@@ -317,8 +322,80 @@ function getYouTubeVideoIdFromText(text) {
   }
 }
 
+const iconPaths = {
+  analytics: ["M4 19V9", "M10 19V5", "M16 19v-7", "M22 19H2"],
+  arrow_forward: ["M5 12h14", "M13 6l6 6-6 6"],
+  arrow_right_alt: ["M4 12h14", "M13 6l6 6-6 6"],
+  auto_awesome: ["M12 3l1.7 5.1L19 10l-5.3 1.9L12 17l-1.7-5.1L5 10l5.3-1.9L12 3Z", "M5 4v4", "M3 6h4", "M19 16v4", "M17 18h4"],
+  calendar_month: ["M7 3v4", "M17 3v4", "M4 9h16", "M5 5h14a1 1 0 0 1 1 1v14H4V6a1 1 0 0 1 1-1Z", "M8 13h.01", "M12 13h.01", "M16 13h.01", "M8 17h.01", "M12 17h.01"],
+  check: ["M5 12l4 4L19 6"],
+  check_circle: ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", "M7.8 12.2l2.8 2.8 5.8-6"],
+  chevron_right: ["M9 18l6-6-6-6"],
+  close: ["M6 6l12 12", "M18 6L6 18"],
+  delete: ["M4 7h16", "M9 7V5h6v2", "M7 7l1 14h8l1-14", "M10 11v6", "M14 11v6"],
+  download: ["M12 4v11", "M7 10l5 5 5-5", "M5 20h14"],
+  edit_note: ["M4 7h10", "M4 12h8", "M4 17h6", "M14 18l5-5 2 2-5 5h-2v-2Z"],
+  expand_more: ["M6 9l6 6 6-6"],
+  explore: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M15.5 8.5l-2 5-5 2 2-5 5-2Z"],
+  favorite: ["M20.5 8.8c0 5.2-8.5 10-8.5 10s-8.5-4.8-8.5-10A4.6 4.6 0 0 1 12 6a4.6 4.6 0 0 1 8.5 2.8Z"],
+  folder_open: ["M3 7h7l2 2h9l-2 10H4L3 7Z", "M3 7v12"],
+  fullscreen: ["M8 3H3v5", "M16 3h5v5", "M8 21H3v-5", "M16 21h5v-5"],
+  fullscreen_exit: ["M9 4v5H4", "M15 4v5h5", "M9 20v-5H4", "M15 20v-5h5"],
+  help: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M9.6 9a2.5 2.5 0 1 1 3.2 2.4c-.8.3-.8.9-.8 1.6", "M12 17h.01"],
+  history: ["M3 12a9 9 0 1 0 3-6.7", "M3 4v5h5", "M12 7v5l3 2"],
+  hourglass_top: ["M6 3h12", "M6 21h12", "M8 3v5l4 4 4-4V3", "M8 21v-5l4-4 4 4v5"],
+  library_music: ["M5 5h12v14H5z", "M9 5V3h10v14h-2", "M9 13.5a2 2 0 1 0 4 0V9l3-1"],
+  local_fire_department: ["M12 21c-3 0-6-2.2-6-5.8 0-2.6 1.5-4.3 3.2-6.1.3 1.6 1.1 2.5 2.3 3.2C11.1 9.2 13 6.5 16 4c.1 3 2 4.8 2 8.2 0 5-3.2 8.8-6 8.8Z"],
+  login: ["M10 17l5-5-5-5", "M15 12H3", "M13 4h6v16h-6"],
+  logout: ["M14 7l5 5-5 5", "M19 12H8", "M11 4H5v16h6"],
+  lyrics: ["M5 5h14v12H8l-3 3V5Z", "M8 9h8", "M8 13h6"],
+  mic: ["M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Z", "M5 11a7 7 0 0 0 14 0", "M12 18v3"],
+  mic_external_on: ["M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Z", "M5 11a7 7 0 0 0 14 0", "M12 18v3", "M3 21h18"],
+  movie: ["M4 5h16v14H4z", "M4 9h16", "M8 5l2 4", "M14 5l2 4"],
+  music_note: ["M14 4v11.5a3 3 0 1 1-2-2.8V7l7-2v4l-5 1.4"],
+  neurology: ["M9 18a5 5 0 0 1-4-8 4 4 0 0 1 5-5 4 4 0 0 1 7 2 4 4 0 0 1 2 7 5 5 0 0 1-5 4", "M12 8v8", "M9 11h6"],
+  notes: ["M5 6h14", "M5 11h14", "M5 16h9"],
+  offline_pin: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M8 12l3 3 5-6"],
+  pace: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M12 12l4-4", "M7 16h10"],
+  pause: ["M8 5h3v14H8z", "M13 5h3v14h-3z"],
+  person: ["M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z", "M4 21a8 8 0 0 1 16 0"],
+  person_add: ["M10 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z", "M3 21a7 7 0 0 1 12-5", "M19 8v6", "M16 11h6"],
+  play_arrow: ["M8 5v14l11-7L8 5Z"],
+  play_circle: ["M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z", "M10 8v8l6-4-6-4Z"],
+  psychology: ["M9 18a5 5 0 0 1-4-8 4 4 0 0 1 5-5 4 4 0 0 1 7 2 4 4 0 0 1 2 7 5 5 0 0 1-5 4", "M12 9v6", "M9 12h6"],
+  qr_code_scanner: ["M4 4h6v6H4z", "M14 4h6v6h-6z", "M4 14h6v6H4z", "M14 14h2", "M18 14h2v2", "M14 18h6"],
+  record_voice_over: ["M5 14a4 4 0 0 0 4 4", "M5 10a4 4 0 0 1 4-4", "M14 8a3 3 0 0 1 0 8", "M17 5a7 7 0 0 1 0 14"],
+  repeat: ["M17 2l4 4-4 4", "M3 11V9a3 3 0 0 1 3-3h15", "M7 22l-4-4 4-4", "M21 13v2a3 3 0 0 1-3 3H3"],
+  repeat_one: ["M17 2l4 4-4 4", "M3 11V9a3 3 0 0 1 3-3h15", "M7 22l-4-4 4-4", "M21 13v2a3 3 0 0 1-3 3H3", "M12 9v6"],
+  search: ["M11 19a8 8 0 1 1 5.7-2.3L21 21", "M16.7 16.7L21 21"],
+  shuffle: ["M16 3h5v5", "M4 7h3c3 0 5 10 8 10h6", "M16 21h5v-5", "M4 17h3c1.4 0 2.5-1.8 3.5-4"],
+  skip_next: ["M5 5l9 7-9 7V5Z", "M17 5v14"],
+  skip_previous: ["M19 5l-9 7 9 7V5Z", "M7 5v14"],
+  slow_motion_video: ["M12 21a9 9 0 1 0-7.8-13.5", "M3 3v5h5", "M10 8v8l6-4-6-4Z"],
+  smart_display: ["M4 6h16v12H4z", "M10 9v6l5-3-5-3Z"],
+  sort_by_alpha: ["M7 4h5", "M7 20h5", "M9.5 4v16", "M16 7l3-3 3 3", "M19 4v16", "M16 17l3 3 3-3"],
+  speed: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M12 12l5-5", "M7 14h2", "M15 17h2"],
+  stop: ["M7 7h10v10H7z"],
+  subtitles: ["M4 6h16v12H4z", "M7 13h5", "M14 13h3", "M7 16h3", "M12 16h5"],
+  swap_horiz: ["M7 7h12", "M15 3l4 4-4 4", "M17 17H5", "M9 13l-4 4 4 4"],
+  timer_10_alt_1: ["M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z", "M9 11h2v6", "M14 11v6", "M10 3h4"],
+  trending_up: ["M3 17l6-6 4 4 7-8", "M14 7h6v6"],
+  tune: ["M4 7h8", "M16 7h4", "M14 5v4", "M4 17h4", "M12 17h8", "M10 15v4"],
+  upload_file: ["M12 16V5", "M7 10l5-5 5 5", "M5 20h14"],
+  verified: ["M12 3l2.1 2 2.9-.3 1.2 2.7 2.7 1.2-.3 2.9 2 2.1-2 2.1.3 2.9-2.7 1.2-1.2 2.7-2.9-.3L12 21l-2.1-2-2.9.3-1.2-2.7-2.7-1.2.3-2.9-2-2.1 2-2.1-.3-2.9 2.7-1.2 1.2-2.7 2.9.3L12 3Z", "M8.5 12l2.3 2.3 4.7-5"],
+  volume_off: ["M4 10v4h4l5 4V6l-5 4H4Z", "M18 9l4 4", "M22 9l-4 4"],
+  volume_up: ["M4 10v4h4l5 4V6l-5 4H4Z", "M16 8a5 5 0 0 1 0 8", "M18.5 5.5a9 9 0 0 1 0 13"],
+  workspace_premium: ["M12 3l8 5-8 13L4 8l8-5Z", "M4 8h16", "M9 8l3 13 3-13"],
+};
+
 function Icon({ name, filled = false }) {
-  return <span className={`material-symbols-outlined ${filled ? "filled" : ""}`}>{name}</span>;
+  const paths = iconPaths[name] || iconPaths.help;
+
+  return (
+    <svg className={`material-symbols-outlined app-icon ${filled ? "filled" : ""}`} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {paths.map((path) => <path key={path} d={path} />)}
+    </svg>
+  );
 }
 
 function ConfirmDialog({ dialog, onResolve }) {
@@ -647,9 +724,11 @@ function YouTubePreviewModal({ result, status, progress, onClose, onDownload }) 
 }
 
 function Header() {
-  const { view, setView, uploadedSong, addLocalSongs, setUploadedSong, updateSongLyrics } = useMeloStore();
+  const { view, setView, uploadedSong, addLocalSongs, setUploadedSong, updateSongLyrics, appMode, showCloudLogin } = useMeloStore();
   const searchRef = useRef(null);
+  const mobileSwitcherRef = useRef(null);
   const searchInputRef = useRef(null);
+  const [isMobileSwitcherOpen, setMobileSwitcherOpen] = useState(false);
   const [isSearchOpen, setSearchOpen] = useState(false);
   const [searchMode, setSearchMode] = useState("song");
   const [searchQuery, setSearchQuery] = useState("");
@@ -666,6 +745,30 @@ function Header() {
   const [previewResult, setPreviewResult] = useState(null);
   const { confirm, dialogElement } = useConfirmDialog();
   const { askSongMetadata, metadataDialogElement } = useSongMetadataDialog();
+
+  useEffect(() => {
+    if (!isMobileSwitcherOpen) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event) => {
+      if (mobileSwitcherRef.current && !mobileSwitcherRef.current.contains(event.target)) {
+        setMobileSwitcherOpen(false);
+      }
+    };
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setMobileSwitcherOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isMobileSwitcherOpen]);
 
   useEffect(() => {
     if (!isSearchOpen) {
@@ -723,6 +826,7 @@ function Header() {
   }, []);
 
   const openSearch = () => {
+    setMobileSwitcherOpen(false);
     setSearchOpen(true);
   };
 
@@ -889,6 +993,14 @@ function Header() {
   };
 
   const downloadYouTubeSong = async (result) => {
+    if (appMode !== "cloud") {
+      setPreviewResult(null);
+      setSearchStatus("error");
+      setSearchMessage("YouTube 下载属于云同步功能，请先登录。");
+      showCloudLogin();
+      return;
+    }
+
     let downloadTarget = result;
     if (result.sourceType === "youtube-paste") {
       const metadata = await askSongMetadata({ videoId: result.id });
@@ -1012,11 +1124,42 @@ function Header() {
     return () => window.removeEventListener("paste", handlePaste);
   }, []);
 
+  const mobileNavItems = [...navItems, { id: "profile", label: "个人中心", icon: "person" }];
+  const currentMobileItem = mobileNavItems.find((item) => item.id === view) || mobileNavItems[0];
+
+  const switchMobileView = (nextView) => {
+    setView(nextView);
+    setMobileSwitcherOpen(false);
+  };
+
   return (
     <header className="shell-nav">
-      <button className="icon-btn ghost mobile-only" aria-label="展开">
-        <Icon name="expand_more" />
-      </button>
+      <div className={`mobile-view-switcher ${isMobileSwitcherOpen ? "open" : ""}`} ref={mobileSwitcherRef}>
+        <button
+          className="icon-btn ghost mobile-only"
+          type="button"
+          aria-label={`切换页面，当前${currentMobileItem.label}`}
+          aria-haspopup="menu"
+          aria-expanded={isMobileSwitcherOpen}
+          onClick={() => setMobileSwitcherOpen((isOpen) => !isOpen)}
+        >
+          <Icon name="expand_more" />
+        </button>
+        <div className="mobile-view-menu" role="menu" aria-label="切换页面">
+          {mobileNavItems.map((item) => (
+            <button
+              key={item.id}
+              className={view === item.id ? "active" : ""}
+              type="button"
+              role="menuitem"
+              onClick={() => switchMobileView(item.id)}
+            >
+              <Icon name={item.icon} filled={view === item.id || item.id === "player"} />
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
       <button className="brand" onClick={() => setView("library")}>MeloMemo</button>
       <nav className="desktop-nav" aria-label="主导航">
         {navItems.map((item) => (
@@ -1081,7 +1224,7 @@ function Header() {
                 <Icon name="close" />
               </button>
             </form>
-	            {(searchHistory.length > 0 || searchStatus !== "idle" || searchMessage || lyricResults.length > 0) && (
+	            {(searchHistory.length > 0 || searchStatus !== "idle" || searchMessage || searchResults.length > 0 || lyricResults.length > 0) && (
 	              <div className="search-results">
 	                {searchMode === "song" && searchHistory.length > 0 && (
 	                  <section className="search-history" aria-label="搜索历史">
@@ -1166,6 +1309,7 @@ function LibraryView() {
   const deleteLocalSong = useMeloStore((state) => state.deleteLocalSong);
   const localSongs = useMeloStore((state) => state.localSongs);
   const songsStatus = useMeloStore((state) => state.songsStatus);
+  const appMode = useMeloStore((state) => state.appMode);
   const [uploadMessage, setUploadMessage] = useState("");
   const { confirm, dialogElement } = useConfirmDialog();
   const downloadedSongs = localSongs.filter((song) => song.sourceType === "youtube");
@@ -1194,20 +1338,20 @@ function LibraryView() {
     }
 
     try {
-      setUploadMessage("正在上传歌曲...");
+      setUploadMessage(appMode === "local" ? "正在保存到本地..." : "正在上传歌曲...");
       const uploaded = await uploadSongDraft({
         title,
         artist,
         audioFile,
         coverFile,
         lyrics,
-      });
+      }, appMode);
       addLocalSongs([uploaded]);
       setUploadedSong(uploaded);
       setUploadMessage("");
       form.reset();
     } catch (error) {
-      setUploadMessage(error instanceof Error ? error.message : "上传失败，请确认后端服务已启动。");
+      setUploadMessage(error instanceof Error ? error.message : appMode === "local" ? "本地保存失败。" : "上传失败，请确认后端服务已启动。");
     }
   };
 
@@ -1226,10 +1370,10 @@ function LibraryView() {
       return;
     }
 
-    setUploadMessage(`正在上传 ${result.songs.length} 首歌曲...`);
+    setUploadMessage(appMode === "local" ? `正在本地导入 ${result.songs.length} 首歌曲...` : `正在上传 ${result.songs.length} 首歌曲...`);
 
     try {
-      const uploadedSongs = await Promise.all(result.songs.map(uploadSongDraft));
+      const uploadedSongs = await Promise.all(result.songs.map((song) => uploadSongDraft(song, appMode)));
       addLocalSongs(uploadedSongs);
       setUploadMessage(
         result.skipped.length > 0
@@ -1237,7 +1381,7 @@ function LibraryView() {
           : `已导入 ${uploadedSongs.length} 首本地歌曲。`,
       );
     } catch (error) {
-      setUploadMessage(error instanceof Error ? error.message : "上传失败，请确认后端服务已启动。");
+      setUploadMessage(error instanceof Error ? error.message : appMode === "local" ? "本地导入失败。" : "上传失败，请确认后端服务已启动。");
     }
     event.currentTarget.value = "";
   };
@@ -1245,7 +1389,9 @@ function LibraryView() {
   const handleDeleteSong = async (song) => {
     const shouldDelete = await confirm({
       title: "删除这首歌？",
-      message: `「${song.title}」会从曲库移除，并同步删除数据库记录、本地音频、封面和歌词文件。`,
+      message: appMode === "local"
+        ? `「${song.title}」会从本地曲库移除，并删除浏览器本地保存的音频、封面和歌词。`
+        : `「${song.title}」会从曲库移除，并同步删除数据库记录、本地音频、封面和歌词文件。`,
       icon: "delete",
       confirmIcon: "delete",
       confirmText: "删除歌曲",
@@ -1411,7 +1557,7 @@ const playbackRateOptions = [
 ];
 
 function PlayerView({ showLyrics = true }) {
-  const { activeWord, isPlaying, isRecording, currentUser, setPlaying, togglePlaying, toggleRecording, toggleWord, saveWord, savedWords, uploadedSong, localSongs, playbackMode, isShuffle, playNextSong, playPreviousSong, handleSongEnded, togglePlaybackMode, toggleShuffle, pendingSeekTime, consumePendingSeekTime, favoriteSongs, toggleFavoriteSong, recordStudyHeartbeat, loadWordLookupStats, updateSongLyrics, setView } = useMeloStore();
+  const { appMode, activeWord, isPlaying, isRecording, currentUser, setPlaying, togglePlaying, toggleRecording, toggleWord, saveWord, savedWords, uploadedSong, localSongs, playbackMode, isShuffle, playNextSong, playPreviousSong, handleSongEnded, togglePlaybackMode, toggleShuffle, pendingSeekTime, consumePendingSeekTime, favoriteSongs, toggleFavoriteSong, recordStudyHeartbeat, loadWordLookupStats, recordWordLookup, updateSongLyrics, setView } = useMeloStore();
   const audioRef = useRef(null);
   const activeLyricRef = useRef(null);
   const syncedLyricsRef = useRef(null);
@@ -1435,6 +1581,7 @@ function PlayerView({ showLyrics = true }) {
   const [playbackRate, setPlaybackRate] = useState(1);
   const [isRateMenuOpen, setRateMenuOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isPseudoFullscreen, setPseudoFullscreen] = useState(false);
   const [recordPosition, setRecordPosition] = useState(null);
   const [wordPopover, setWordPopover] = useState(null);
   const [lyricEditor, setLyricEditor] = useState(null);
@@ -1478,7 +1625,8 @@ function PlayerView({ showLyrics = true }) {
     : playbackMode === "repeat-all"
       ? { icon: "repeat", label: "列表循环" }
       : { icon: "arrow_right_alt", label: "顺序播放" };
-  const canUseFullscreen = typeof document !== "undefined" && Boolean(document.fullscreenEnabled);
+  const canUseNativeFullscreen = typeof document !== "undefined" && Boolean(document.fullscreenEnabled && document.documentElement.requestFullscreen);
+  const isFullscreenActive = isFullscreen || isPseudoFullscreen;
   const lyricLines = uploadedSong ? uploadedSong.lyrics ?? [] : [];
   const hasLyrics = lyricLines.length > 0;
   const getActiveLineIndex = (time) => lyricLines.reduce(
@@ -1673,19 +1821,29 @@ function PlayerView({ showLyrics = true }) {
   const toggleFullscreen = async (event) => {
     event?.currentTarget?.blur();
 
-    if (!canUseFullscreen) {
+    if (isPseudoFullscreen) {
+      setPseudoFullscreen(false);
       return;
     }
 
     try {
       if (document.fullscreenElement) {
         await document.exitFullscreen();
+        return;
       } else {
-        await document.documentElement.requestFullscreen();
+        if (canUseNativeFullscreen) {
+          await document.documentElement.requestFullscreen();
+        }
+      }
+      if (document.fullscreenElement) {
+        return;
       }
     } catch {
       setIsFullscreen(Boolean(document.fullscreenElement));
     }
+
+    setView("player");
+    setPseudoFullscreen(true);
   };
   const openPlayerFromBar = (event) => {
     const target = event.target;
@@ -1738,6 +1896,37 @@ function PlayerView({ showLyrics = true }) {
     duckSongVolume(0.14);
 
     try {
+      if (appMode === "local" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(word);
+        utterance.lang = lang;
+        utterance.rate = 0.82;
+        utterance.volume = 1;
+        utterance.onend = restoreSongVolume;
+        utterance.onerror = () => {
+          restoreSongVolume();
+          setWordPopover((current) =>
+            current?.word === word ? { ...current, ttsStatus: "error", ttsError: `浏览器${getTtsAccentLabel(lang)}发音暂时不可用。` } : current,
+          );
+        };
+        window.speechSynthesis.speak(utterance);
+        setWordPopover((current) =>
+          current?.word === word
+            ? {
+                ...current,
+                ttsStatus: "ready",
+                ttsMeta: {
+                  cached: false,
+                  engine: "浏览器 speechSynthesis",
+                  lang,
+                  voice: "local",
+                },
+              }
+            : current,
+        );
+        return;
+      }
+
       const response = await fetch("/api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1959,6 +2148,16 @@ function PlayerView({ showLyrics = true }) {
           ? { ...current, status: "ready", data }
           : current,
       );
+      await recordWordLookup({
+        word: data.word || word,
+        phonetic: data.phonetic,
+        usPhonetic: data.usPhonetic,
+        ukPhonetic: data.ukPhonetic,
+        partOfSpeech: data.partOfSpeech,
+        meaning: data.meaning,
+        lookupCount: 1,
+        lastLookedUpAt: new Date().toISOString(),
+      });
       void loadWordLookupStats();
     } catch (error) {
       setWordPopover((current) =>
@@ -2282,12 +2481,33 @@ function PlayerView({ showLyrics = true }) {
 
     const syncFullscreenState = () => {
       setIsFullscreen(Boolean(document.fullscreenElement));
+      if (document.fullscreenElement) {
+        setPseudoFullscreen(false);
+      }
     };
 
     syncFullscreenState();
     document.addEventListener("fullscreenchange", syncFullscreenState);
     return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
   }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return undefined;
+    }
+
+    document.body.classList.toggle("player-pseudo-fullscreen", isPseudoFullscreen);
+    return () => document.body.classList.remove("player-pseudo-fullscreen");
+  }, [isPseudoFullscreen]);
+
+  useEffect(() => {
+    if (showLyrics) {
+      return undefined;
+    }
+
+    setPseudoFullscreen(false);
+    return undefined;
+  }, [showLyrics]);
 
   useEffect(() => {
     const placeDefaultRecorder = () => {
@@ -2577,15 +2797,14 @@ function PlayerView({ showLyrics = true }) {
               )}
             </div>
             <button
-              className={`icon-btn ghost fullscreen-btn ${isFullscreen ? "active-icon" : ""}`}
+              className={`icon-btn ghost fullscreen-btn ${isFullscreenActive ? "active-icon" : ""}`}
               type="button"
-              aria-label={isFullscreen ? "退出全屏" : "进入全屏"}
-              aria-pressed={isFullscreen}
+              aria-label={isFullscreenActive ? "退出全屏" : "进入全屏"}
+              aria-pressed={isFullscreenActive}
               onClick={toggleFullscreen}
-              title={isFullscreen ? "退出全屏" : "进入全屏"}
-              disabled={!canUseFullscreen}
+              title={isFullscreenActive ? "退出全屏" : "进入全屏"}
             >
-              <Icon name={isFullscreen ? "fullscreen_exit" : "fullscreen"} />
+              <Icon name={isFullscreenActive ? "fullscreen_exit" : "fullscreen"} />
             </button>
             <button
               className={`icon-btn ghost favorite-btn ${isCurrentSongFavorite ? "saved" : ""}`}
@@ -2890,7 +3109,7 @@ function ProfileLoginView() {
 }
 
 function ProfileView() {
-  const { currentUser, profileStats: accountStats, profileStatus, favoriteSongs, setUploadedSong, setView, logout } = useMeloStore();
+  const { appMode, currentUser, profileStats: accountStats, profileStatus, favoriteSongs, setUploadedSong, setView, logout, showCloudLogin } = useMeloStore();
   if (!currentUser) {
     return <ProfileLoginView />;
   }
@@ -2936,11 +3155,17 @@ function ProfileView() {
             </div>
             <div className="profile-copy">
               <h1>{currentUser?.displayName || "音律旅人"}</h1>
-              <span className="level-chip">{currentUser?.levelTitle || "LV.4 节奏大师"}</span>
+              <span className="level-chip">{appMode === "local" ? "本地模式" : currentUser?.levelTitle || "LV.4 节奏大师"}</span>
               <p>"{currentUser?.bio || "在旋律中寻找灵魂的共鸣"}"</p>
             </div>
-            <button className="profile-logout" type="button" onClick={logout} aria-label="退出登录">
-              <Icon name="logout" />
+            <button
+              className="profile-logout"
+              type="button"
+              onClick={appMode === "local" ? showCloudLogin : logout}
+              aria-label={appMode === "local" ? "登录并同步" : "退出登录"}
+              title={appMode === "local" ? "登录并同步" : "退出登录"}
+            >
+              <Icon name={appMode === "local" ? "login" : "logout"} />
             </button>
           </section>
 
