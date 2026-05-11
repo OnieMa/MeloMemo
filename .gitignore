@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env.local
 .env*.local
+.env.docker
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts

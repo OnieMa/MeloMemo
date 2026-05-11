@@ -38,6 +38,7 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (_request, b
 });
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
+const clientDistRoot = path.join(projectRoot, "dist");
 const uploadRoot = path.join(projectRoot, "server", "uploads");
 const ttsRoot = path.join(uploadRoot, "tts");
 const youtubeRoot = path.join(uploadRoot, "youtube");
@@ -651,6 +652,32 @@ const fileExists = async (filePath: string) => {
   } catch {
     return false;
   }
+};
+
+const registerClientAssets = async () => {
+  const indexPath = path.join(clientDistRoot, "index.html");
+
+  if (!(await fileExists(indexPath))) {
+    return;
+  }
+
+  await app.register(fastifyStatic, {
+    root: clientDistRoot,
+    prefix: "/",
+    decorateReply: false,
+  });
+
+  app.setNotFoundHandler(async (request, reply) => {
+    const url = request.raw.url || "";
+
+    if (url === "/api" || url.startsWith("/api/") || url.startsWith("/uploads/")) {
+      return reply.code(404).send({ message: "Not found" });
+    }
+
+    return reply
+      .type("text/html; charset=utf-8")
+      .send(await readFile(indexPath, "utf8"));
+  });
 };
 
 const normalizeDictionaryWord = (value: string) => value.toLowerCase().replace(/[^a-z'-]/g, "");
@@ -2896,6 +2923,7 @@ const port = Number(process.env.API_PORT ?? 8787);
 
 try {
   await ensureWordLookupSourceColumn();
+  await registerClientAssets();
   await app.listen({ port, host: "0.0.0.0" });
 } catch (error) {
   app.log.error(error);

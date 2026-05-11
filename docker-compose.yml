@@ -1,0 +1,26 @@
+services:
+  melomemo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: melomemo:latest
+    container_name: melomemo
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - path: .env.docker
+        required: false
+    environment:
+      API_PORT: "8787"
+      DATABASE_URL: "file:/app/data/melomemo.db"
+      APP_TIME_ZONE: "Asia/Shanghai"
+    volumes:
+      - melomemo-data:/app/data
+      - melomemo-uploads:/app/server/uploads
+      - melomemo-dictionaries:/app/server/dictionaries
+
+volumes:
+  melomemo-data:
+  melomemo-uploads:
+  melomemo-dictionaries:
