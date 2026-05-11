@@ -63,6 +63,46 @@ type VocabularyPayload = {
   sourceLine?: string;
 };
 
+type WordLookupSourcePayload = {
+  sourceSong?: string;
+  sourceSongId?: string;
+  sourceTime?: number | string;
+  sourceLine?: string;
+};
+
+type WordLookupSongRef = {
+  songKey: string;
+  songId?: string;
+  songTitle: string;
+  lookupCount: number;
+  lastLookedUpAt: string;
+  sourceTime?: number;
+  sourceLine?: string;
+};
+
+type WordLookupSyncPayload = {
+  words?: Array<{
+    word?: string;
+    phonetic?: string;
+    usPhonetic?: string;
+    ukPhonetic?: string;
+    partOfSpeech?: string;
+    meaning?: string;
+    lookupCount?: number | string;
+    lastLookedUpAt?: string;
+    sourceSongs?: WordLookupSongRef[];
+  }>;
+};
+
+type StudySyncPayload = {
+  days?: Array<{
+    dateKey?: string;
+    totalSeconds?: number | string;
+    learnedSongIds?: string[];
+    lastStudiedAt?: string;
+  }>;
+};
+
 type TtsPayload = {
   text?: string;
   lang?: string;
@@ -432,6 +472,16 @@ const normalizeStudySeconds = (value: number | string | undefined) => {
   }
 
   return Math.min(300, Math.max(0, Math.round(numberValue)));
+};
+
+const normalizeSyncedStudySeconds = (value: number | string | undefined) => {
+  const numberValue = Number(value);
+
+  if (!Number.isFinite(numberValue)) {
+    return 0;
+  }
+
+  return Math.min(86400, Math.max(0, Math.round(numberValue)));
 };
 
 const buildStudyStats = async (userId: string, conqueredSentences = 0) => {
@@ -1406,7 +1456,138 @@ const lookupDictionaryApi = async (word: string): Promise<Partial<DictionaryEntr
   };
 };
 
-const recordWordLookup = async (userId: string, entry: DictionaryLookupResult) => {
+const parseWordLookupSongRefs = (value?: string | null): WordLookupSongRef[] => {
+  if (!value) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter((item): item is WordLookupSongRef =>
+      typeof item?.songKey === "string" &&
+      typeof item.songTitle === "string" &&
+      typeof item.lookupCount === "number" &&
+      typeof item.lastLookedUpAt === "string",
+    );
+  } catch {
+    return [];
+  }
+};
+
+const getWordLookupSource = (payload: WordLookupSourcePayload = {}) => {
+  const sourceSong = payload.sourceSong?.trim();
+  const sourceSongId = payload.sourceSongId?.trim();
+  const sourceTimeValue = Number(payload.sourceTime);
+  const sourceTime = Number.isFinite(sourceTimeValue) ? sourceTimeValue : undefined;
+
+  if (!sourceSong && !sourceSongId) {
+    return null;
+  }
+
+  return {
+    songKey: sourceSongId ? `song-id:${sourceSongId}` : `song-title:${sourceSong}`,
+    songId: sourceSongId || undefined,
+    songTitle: sourceSong || "未命名歌曲",
+    sourceTime,
+    sourceLine: payload.sourceLine?.trim() || undefined,
+  };
+};
+
+const mergeWordLookupSongRefs = (
+  currentValue: string | null | undefined,
+  source: ReturnType<typeof getWordLookupSource>,
+  lookedUpAt: Date,
+) => {
+  const refs = new Map(parseWordLookupSongRefs(currentValue).map((item) => [item.songKey, item]));
+
+  if (source) {
+    const existing = refs.get(source.songKey);
+    refs.set(source.songKey, {
+      ...existing,
+      ...source,
+      lookupCount: (existing?.lookupCount ?? 0) + 1,
+      lastLookedUpAt: lookedUpAt.toISOString(),
+    });
+  }
+
+  return JSON.stringify([...refs.values()].sort((a, b) => b.lastLookedUpAt.localeCompare(a.lastLookedUpAt)));
+};
+
+const normalizeWordLookupSongRef = (ref: WordLookupSongRef | undefined): WordLookupSongRef | null => {
+  if (!ref?.songTitle?.trim() && !ref?.songId?.trim()) {
+    return null;
+  }
+
+  const songTitle = ref.songTitle?.trim() || "未命名歌曲";
+  const songId = ref.songId?.trim() || undefined;
+  const lookupCount = Math.max(1, Math.round(Number(ref.lookupCount) || 1));
+  const lastLookedUpAt = Number.isFinite(Date.parse(ref.lastLookedUpAt)) ? ref.lastLookedUpAt : new Date().toISOString();
+
+  return {
+    songKey: songId ? `song-id:${songId}` : ref.songKey || `song-title:${songTitle}`,
+    songId,
+    songTitle,
+    lookupCount,
+    lastLookedUpAt,
+    sourceTime: Number.isFinite(Number(ref.sourceTime)) ? Number(ref.sourceTime) : undefined,
+    sourceLine: ref.sourceLine?.trim() || undefined,
+  };
+};
+
+const mergeWordLookupSongRefList = (currentValue: string | null | undefined, incomingRefs: WordLookupSongRef[] = []) => {
+  const refs = new Map(parseWordLookupSongRefs(currentValue).map((item) => [item.songKey, item]));
+
+  for (const rawRef of incomingRefs) {
+    const ref = normalizeWordLookupSongRef(rawRef);
+    if (!ref) {
+      continue;
+    }
+
+    const existing = refs.get(ref.songKey);
+    refs.set(ref.songKey, {
+      ...existing,
+      ...ref,
+      lookupCount: Math.max(existing?.lookupCount ?? 0, ref.lookupCount),
+      lastLookedUpAt:
+        Date.parse(ref.lastLookedUpAt) >= Date.parse(existing?.lastLookedUpAt || "")
+          ? ref.lastLookedUpAt
+          : existing?.lastLookedUpAt || ref.lastLookedUpAt,
+    });
+  }
+
+  return JSON.stringify([...refs.values()].sort((a, b) => b.lastLookedUpAt.localeCompare(a.lastLookedUpAt)));
+};
+
+const ensureWordLookupSourceColumn = async () => {
+  const columns = await prisma.$queryRawUnsafe<Array<{ name: string }>>("PRAGMA table_info('UserWordLookup')");
+
+  if (columns.length > 0 && !columns.some((column) => column.name === "sourceSongRefs")) {
+    await prisma.$executeRawUnsafe("ALTER TABLE \"UserWordLookup\" ADD COLUMN \"sourceSongRefs\" TEXT NOT NULL DEFAULT '[]'");
+  }
+};
+
+const getWordLookupSourceRefs = async (userId: string, word: string) => {
+  const rows = await prisma.$queryRawUnsafe<Array<{ sourceSongRefs?: string }>>(
+    "SELECT \"sourceSongRefs\" FROM \"UserWordLookup\" WHERE \"userId\" = ? AND \"word\" = ? LIMIT 1",
+    userId,
+    word,
+  );
+
+  return rows[0]?.sourceSongRefs;
+};
+
+const recordWordLookup = async (
+  userId: string,
+  entry: DictionaryLookupResult,
+  source?: ReturnType<typeof getWordLookupSource>,
+) => {
+  const lookedUpAt = new Date();
+  const sourceSongRefs = mergeWordLookupSongRefs(await getWordLookupSourceRefs(userId, entry.word), source ?? null, lookedUpAt);
+
   await prisma.userWordLookup.upsert({
     where: {
       userId_word: {
@@ -1423,7 +1604,7 @@ const recordWordLookup = async (userId: string, entry: DictionaryLookupResult) =
       lookupCount: {
         increment: 1,
       },
-      lastLookedUpAt: new Date(),
+      lastLookedUpAt: lookedUpAt,
     },
     create: {
       userId,
@@ -1434,9 +1615,15 @@ const recordWordLookup = async (userId: string, entry: DictionaryLookupResult) =
       partOfSpeech: entry.partOfSpeech,
       meaning: entry.meaning,
       lookupCount: 1,
-      lastLookedUpAt: new Date(),
+      lastLookedUpAt: lookedUpAt,
     },
   });
+  await prisma.$executeRawUnsafe(
+    "UPDATE \"UserWordLookup\" SET \"sourceSongRefs\" = ? WHERE \"userId\" = ? AND \"word\" = ?",
+    sourceSongRefs,
+    userId,
+    entry.word,
+  );
 };
 
 const buildXfYunAuthUrl = () => {
@@ -1887,6 +2074,66 @@ app.post<{ Body: StudyHeartbeatPayload }>("/api/study/heartbeat", async (request
   };
 });
 
+app.post<{ Body: StudySyncPayload }>("/api/study/sync", async (request, reply) => {
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
+  const days = Array.isArray(request.body.days) ? request.body.days.slice(0, 370) : [];
+
+  for (const day of days) {
+    if (!isValidDateKey(day.dateKey)) {
+      continue;
+    }
+
+    const totalSeconds = normalizeSyncedStudySeconds(day.totalSeconds);
+    const lastStudiedAt = Number.isFinite(Date.parse(day.lastStudiedAt || ""))
+      ? new Date(day.lastStudiedAt as string)
+      : new Date(`${day.dateKey}T00:00:00.000Z`);
+    const existing = await prisma.userStudyDay.findUnique({
+      where: {
+        userId_dateKey: {
+          userId: user.id,
+          dateKey: day.dateKey as string,
+        },
+      },
+    });
+    const learnedSongIds = new Set(existing ? parseStudySongIds(existing.learnedSongIds) : []);
+
+    for (const songId of day.learnedSongIds ?? []) {
+      if (typeof songId === "string" && songId.trim()) {
+        learnedSongIds.add(songId.trim());
+      }
+    }
+
+    if (existing) {
+      await prisma.userStudyDay.update({
+        where: { id: existing.id },
+        data: {
+          totalSeconds: Math.max(existing.totalSeconds, totalSeconds),
+          learnedSongIds: JSON.stringify(Array.from(learnedSongIds)),
+          lastStudiedAt: existing.lastStudiedAt > lastStudiedAt ? existing.lastStudiedAt : lastStudiedAt,
+        },
+      });
+    } else {
+      await prisma.userStudyDay.create({
+        data: {
+          userId: user.id,
+          dateKey: day.dateKey as string,
+          totalSeconds,
+          learnedSongIds: JSON.stringify(Array.from(learnedSongIds)),
+          lastStudiedAt,
+        },
+      });
+    }
+  }
+
+  const profile = await ensureUserProfile(user.id);
+  return {
+    stats: await buildStudyStats(user.id, profile.conqueredSentences),
+  };
+});
+
 app.get("/api/vocabulary", async (request, reply) => {
   const user = await requireRequestUser(request, reply);
   if (!user) {
@@ -2163,24 +2410,108 @@ app.get("/api/word-lookups", async (request, reply) => {
       { lastLookedUpAt: "desc" },
     ],
   });
+  const sourceRows = await prisma.$queryRawUnsafe<Array<{ word: string; sourceSongRefs?: string }>>(
+    "SELECT \"word\", \"sourceSongRefs\" FROM \"UserWordLookup\" WHERE \"userId\" = ?",
+    user.id,
+  );
+  const sourceRefMap = new Map(sourceRows.map((item) => [item.word, item.sourceSongRefs]));
 
   return {
-    words: words.map((item) => ({
-      word: item.word,
-      phonetic: item.usPhonetic || item.phonetic || undefined,
-      usPhonetic: item.usPhonetic || undefined,
-      ukPhonetic: item.ukPhonetic || undefined,
-      partOfSpeech: item.partOfSpeech || undefined,
-      meaning: item.meaning,
-      lookupCount: item.lookupCount,
-      lastLookedUpAt: item.lastLookedUpAt.toISOString(),
-    })),
+    words: words.map((item) => {
+      const sourceSongs = parseWordLookupSongRefs(sourceRefMap.get(item.word));
+
+      return {
+        word: item.word,
+        phonetic: item.usPhonetic || item.phonetic || undefined,
+        usPhonetic: item.usPhonetic || undefined,
+        ukPhonetic: item.ukPhonetic || undefined,
+        partOfSpeech: item.partOfSpeech || undefined,
+        meaning: item.meaning,
+        lookupCount: item.lookupCount,
+        lastLookedUpAt: item.lastLookedUpAt.toISOString(),
+        sourceSongs,
+        songCount: sourceSongs.length,
+      };
+    }),
   };
 });
 
-app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, reply) => {
+app.post<{ Body: WordLookupSyncPayload }>("/api/word-lookups/sync", async (request, reply) => {
+  const user = await requireRequestUser(request, reply);
+  if (!user) {
+    return;
+  }
+  const words = Array.isArray(request.body.words) ? request.body.words.slice(0, 1000) : [];
+
+  for (const item of words) {
+    const word = normalizeDictionaryWord(item.word || "");
+    const meaning = item.meaning?.trim();
+
+    if (!word || !meaning) {
+      continue;
+    }
+
+    const existing = await prisma.userWordLookup.findUnique({
+      where: {
+        userId_word: {
+          userId: user.id,
+          word,
+        },
+      },
+    });
+    const incomingLookupCount = Math.max(1, Math.round(Number(item.lookupCount) || 1));
+    const lastLookedUpAt = Number.isFinite(Date.parse(item.lastLookedUpAt || ""))
+      ? new Date(item.lastLookedUpAt as string)
+      : new Date();
+    const sourceSongRefs = mergeWordLookupSongRefList(
+      await getWordLookupSourceRefs(user.id, word),
+      item.sourceSongs ?? [],
+    );
+
+    await prisma.userWordLookup.upsert({
+      where: {
+        userId_word: {
+          userId: user.id,
+          word,
+        },
+      },
+      update: {
+        phonetic: item.phonetic?.trim(),
+        usPhonetic: item.usPhonetic?.trim(),
+        ukPhonetic: item.ukPhonetic?.trim(),
+        partOfSpeech: item.partOfSpeech?.trim(),
+        meaning,
+        lookupCount: Math.max(existing?.lookupCount ?? 0, incomingLookupCount),
+        lastLookedUpAt: existing && existing.lastLookedUpAt > lastLookedUpAt ? existing.lastLookedUpAt : lastLookedUpAt,
+      },
+      create: {
+        userId: user.id,
+        word,
+        phonetic: item.phonetic?.trim(),
+        usPhonetic: item.usPhonetic?.trim(),
+        ukPhonetic: item.ukPhonetic?.trim(),
+        partOfSpeech: item.partOfSpeech?.trim(),
+        meaning,
+        lookupCount: incomingLookupCount,
+        lastLookedUpAt,
+      },
+    });
+    await prisma.$executeRawUnsafe(
+      "UPDATE \"UserWordLookup\" SET \"sourceSongRefs\" = ? WHERE \"userId\" = ? AND \"word\" = ?",
+      sourceSongRefs,
+      user.id,
+      word,
+    );
+  }
+
+  const syncedWords = await prisma.userWordLookup.count({ where: { userId: user.id } });
+  return { syncedWords };
+});
+
+app.get<{ Params: { word: string }; Querystring: WordLookupSourcePayload }>("/api/dictionary/:word", async (request, reply) => {
   const user = await getRequestUser(request);
   const word = normalizeDictionaryWord(request.params.word);
+  const lookupSource = getWordLookupSource(request.query);
 
   if (!word) {
     return reply.code(400).send({ message: "word is required" });
@@ -2205,7 +2536,7 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
     };
 
     if (user) {
-      await recordWordLookup(user.id, result);
+      await recordWordLookup(user.id, result, lookupSource);
     }
     return result;
   }
@@ -2230,7 +2561,7 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
     };
 
     if (user) {
-      await recordWordLookup(user.id, result);
+      await recordWordLookup(user.id, result, lookupSource);
     }
     return result;
   } catch {
@@ -2256,7 +2587,7 @@ app.get<{ Params: { word: string } }>("/api/dictionary/:word", async (request, r
     };
 
     if (user) {
-      await recordWordLookup(user.id, result);
+      await recordWordLookup(user.id, result, lookupSource);
     }
     return result;
   }
@@ -2347,6 +2678,22 @@ app.post("/api/songs", async (request, reply) => {
     const title = fields.title?.trim();
     const artist = fields.artist?.trim() || "Local Artist";
     const lyrics = fields.lyrics?.trim();
+    const sourceType = fields.sourceType === "local-sync" ? "local-sync" : "upload";
+    const externalId = fields.externalId?.trim();
+
+    if (sourceType === "local-sync" && externalId) {
+      const existingSong = await prisma.song.findFirst({
+        where: {
+          userId: user.id,
+          sourceType,
+          externalId,
+        },
+      });
+
+      if (existingSong) {
+        return { song: normalizeSong(existingSong), reused: true };
+      }
+    }
 
     if (!title || !files.audio || !lyrics) {
       return reply.code(400).send({
@@ -2362,7 +2709,8 @@ app.post("/api/songs", async (request, reply) => {
         audioUrl: files.audio.url,
         coverUrl: files.cover?.url,
         lyrics,
-        sourceType: "upload",
+        sourceType,
+        externalId,
       },
     });
 
@@ -2547,6 +2895,7 @@ app.delete<{ Params: { word: string } }>("/api/vocabulary/:word", async (request
 const port = Number(process.env.API_PORT ?? 8787);
 
 try {
+  await ensureWordLookupSourceColumn();
   await app.listen({ port, host: "0.0.0.0" });
 } catch (error) {
   app.log.error(error);

@@ -5,6 +5,8 @@ import {
   deleteLocalSong as deleteLocalSongRecord,
   listLocalFavorites,
   listLocalSongs as listLocalSongRecords,
+  listLocalSongSyncRecords,
+  listLocalStudyDays,
   listLocalVocabulary,
   listLocalWordLookups,
   recordLocalStudyHeartbeat,
@@ -25,6 +27,9 @@ export type SavedWord = {
   sourceSongId?: string;
   sourceTime?: number;
   sourceLine?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  savedAt?: string;
 };
 
 export type LyricLine = {
@@ -41,7 +46,7 @@ export type UploadedSong = {
   coverUrl?: string;
   lyrics: LyricLine[];
   lyricsUrl?: string;
-  sourceType?: "upload" | "youtube";
+  sourceType?: "upload" | "youtube" | "local-sync";
   sourceUrl?: string;
   externalId?: string;
 };
@@ -93,14 +98,47 @@ export type WordLookupStat = {
   meaning: string;
   lookupCount: number;
   lastLookedUpAt: string;
+  sourceSong?: string;
+  sourceSongId?: string;
+  sourceTime?: number;
+  sourceLine?: string;
+  sourceSongs?: Array<{
+    songKey: string;
+    songId?: string;
+    songTitle: string;
+    lookupCount: number;
+    lastLookedUpAt: string;
+    sourceTime?: number;
+    sourceLine?: string;
+  }>;
+  songCount?: number;
+};
+
+export type LyricAnnotation = {
+  id: string;
+  songKey: string;
+  lineId?: string;
+  lineTime?: number;
+  word: string;
+  wordIndex: number;
+  phonetic?: string;
+  meaning: string;
+  partOfSpeech?: string;
+  sourceLine?: string;
+  lastLookedUpAt: string;
 };
 
 type PlaybackMode = "order" | "repeat-all" | "repeat-one";
 type AppMode = "local" | "cloud";
+type PronunciationBackgroundMode = "duck" | "pause";
 
 const AUTH_TOKEN_KEY = "melomemo.authToken";
 const AUTH_EXPIRES_AT_KEY = "melomemo.authExpiresAt";
 const LEGACY_CURRENT_USER_KEY = "melomemo.currentUserId";
+const LOCAL_MODE_KEY = "melomemo.localModeEnabled";
+const PRONUNCIATION_BACKGROUND_MODE_KEY = "melomemo.pronunciationBackgroundMode";
+const LYRIC_ANNOTATIONS_ENABLED_KEY = "melomemo.lyricAnnotationsEnabled";
+const LYRIC_ANNOTATIONS_KEY = "melomemo.lyricAnnotations";
 const localUser: MeloUser = {
   id: "local",
   email: "local@melomemo.local",
@@ -159,6 +197,7 @@ const writeAuthSession = (session?: { token?: string; expiresAt?: string }) => {
   window.localStorage.setItem(AUTH_TOKEN_KEY, session.token);
   window.localStorage.setItem(AUTH_EXPIRES_AT_KEY, session.expiresAt);
   window.localStorage.removeItem(LEGACY_CURRENT_USER_KEY);
+  window.localStorage.removeItem(LOCAL_MODE_KEY);
 };
 
 const clearAuthSession = () => {
@@ -169,6 +208,98 @@ const clearAuthSession = () => {
   window.localStorage.removeItem(AUTH_TOKEN_KEY);
   window.localStorage.removeItem(AUTH_EXPIRES_AT_KEY);
   window.localStorage.removeItem(LEGACY_CURRENT_USER_KEY);
+};
+
+const readLocalModePreference = () => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return window.localStorage.getItem(LOCAL_MODE_KEY) === "true";
+};
+
+const writeLocalModePreference = () => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(LOCAL_MODE_KEY, "true");
+};
+
+const clearLocalModePreference = () => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.removeItem(LOCAL_MODE_KEY);
+};
+
+const readPronunciationBackgroundMode = (): PronunciationBackgroundMode => {
+  if (typeof window === "undefined") {
+    return "duck";
+  }
+
+  return window.localStorage.getItem(PRONUNCIATION_BACKGROUND_MODE_KEY) === "pause" ? "pause" : "duck";
+};
+
+const writePronunciationBackgroundMode = (mode: PronunciationBackgroundMode) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(PRONUNCIATION_BACKGROUND_MODE_KEY, mode);
+};
+
+const readLyricAnnotationsEnabled = () => {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return window.localStorage.getItem(LYRIC_ANNOTATIONS_ENABLED_KEY) === "true";
+};
+
+const writeLyricAnnotationsEnabled = (enabled: boolean) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(LYRIC_ANNOTATIONS_ENABLED_KEY, String(enabled));
+};
+
+const readLyricAnnotations = (): LyricAnnotation[] => {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const annotations = JSON.parse(window.localStorage.getItem(LYRIC_ANNOTATIONS_KEY) || "[]");
+    if (!Array.isArray(annotations)) {
+      return [];
+    }
+
+    return annotations.filter((item): item is LyricAnnotation =>
+      Boolean(
+        item &&
+          typeof item === "object" &&
+          typeof item.id === "string" &&
+          typeof item.songKey === "string" &&
+          typeof item.word === "string" &&
+          typeof item.wordIndex === "number" &&
+          typeof item.meaning === "string" &&
+          typeof item.lastLookedUpAt === "string",
+      ),
+    );
+  } catch {
+    return [];
+  }
+};
+
+const writeLyricAnnotations = (annotations: LyricAnnotation[]) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(LYRIC_ANNOTATIONS_KEY, JSON.stringify(annotations.slice(0, 1000)));
 };
 
 const getLocalDateKey = () => {
@@ -191,6 +322,151 @@ const createRequestOptions = (token?: string | null): RequestInit => ({
   headers: createAuthHeader(token),
 });
 
+const getSafeFileName = (name: string, extension: string) => {
+  const normalized = name.trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ");
+  return `${normalized || "melomemo-song"}${extension}`;
+};
+
+const ensureCloudSyncResponse = async (response: Response, fallbackMessage: string) => {
+  if (response.ok) {
+    return;
+  }
+
+  const data = await response.json().catch(() => null);
+  throw new Error(data?.message || fallbackMessage);
+};
+
+const uploadLocalSongToCloud = async (
+  song: Awaited<ReturnType<typeof listLocalSongSyncRecords>>[number],
+  token: string,
+) => {
+  const formData = new FormData();
+  const audioExtension = song.audioBlob.type.includes("mpeg") || song.audioBlob.type.includes("mp3") ? ".mp3" : ".audio";
+  formData.append("title", song.title);
+  formData.append("artist", song.artist);
+  formData.append("lyrics", JSON.stringify(song.lyrics));
+  formData.append("sourceType", "local-sync");
+  formData.append("externalId", song.id);
+  formData.append("audio", song.audioBlob, getSafeFileName(song.title, audioExtension));
+
+  if (song.coverBlob) {
+    formData.append("cover", song.coverBlob, getSafeFileName(`${song.title}-cover`, ".cover"));
+  }
+
+  const response = await fetch("/api/songs", {
+    method: "POST",
+    headers: createAuthHeader(token),
+    body: formData,
+  });
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(data?.message || "本地歌曲同步失败。");
+  }
+
+  return data.song as UploadedSong;
+};
+
+const syncLocalDataToCloud = async (token: string) => {
+  const [localSongs, localFavorites, localWords, localLookups, localStudyDays] = await Promise.all([
+    listLocalSongSyncRecords(),
+    listLocalFavorites(),
+    listLocalVocabulary(),
+    listLocalWordLookups(),
+    listLocalStudyDays(),
+  ]);
+  const cloudSongByLocalId = new Map<string, UploadedSong>();
+  const cloudSongByTitle = new Map<string, UploadedSong>();
+  const existingSongsResponse = await fetch("/api/songs", createRequestOptions(token));
+
+  if (existingSongsResponse.ok) {
+    const data = await existingSongsResponse.json().catch(() => null);
+    for (const song of data?.songs ?? []) {
+      if (song.sourceType === "local-sync" && song.externalId) {
+        cloudSongByLocalId.set(song.externalId, song);
+      }
+      cloudSongByTitle.set(`${song.title.trim().toLowerCase()}::${song.artist.trim().toLowerCase()}`, song);
+    }
+  }
+
+  for (const localSong of localSongs) {
+    if (cloudSongByLocalId.has(localSong.id)) {
+      continue;
+    }
+
+    const cloudSong = await uploadLocalSongToCloud(localSong, token);
+    cloudSongByLocalId.set(localSong.id, cloudSong);
+    cloudSongByTitle.set(`${localSong.title.trim().toLowerCase()}::${localSong.artist.trim().toLowerCase()}`, cloudSong);
+  }
+
+  const resolveCloudSong = (song?: Pick<FavoriteSong, "id" | "title" | "artist"> | null) => {
+    if (!song) {
+      return null;
+    }
+
+    return (song.id ? cloudSongByLocalId.get(song.id) : null)
+      || cloudSongByTitle.get(`${song.title.trim().toLowerCase()}::${song.artist.trim().toLowerCase()}`)
+      || null;
+  };
+  const mapSongId = (songId?: string) => songId ? cloudSongByLocalId.get(songId)?.id || songId : undefined;
+
+  for (const word of localWords) {
+    const response = await fetch("/api/vocabulary", {
+      method: "POST",
+      headers: createHeaders(token),
+      body: JSON.stringify({
+        ...word,
+        sourceSongId: mapSongId(word.sourceSongId),
+      }),
+    });
+    await ensureCloudSyncResponse(response, "本地生词同步失败。");
+  }
+
+  for (const favorite of localFavorites) {
+    const cloudSong = resolveCloudSong(favorite);
+    const response = await fetch("/api/favorites", {
+      method: "POST",
+      headers: createHeaders(token),
+      body: JSON.stringify(cloudSong || favorite),
+    });
+    await ensureCloudSyncResponse(response, "本地收藏同步失败。");
+  }
+
+  if (localLookups.length > 0) {
+    const response = await fetch("/api/word-lookups/sync", {
+      method: "POST",
+      headers: createHeaders(token),
+      body: JSON.stringify({
+        words: localLookups.map((lookup) => ({
+          ...lookup,
+          sourceSongs: lookup.sourceSongs?.map((song) => ({
+            ...song,
+            songId: mapSongId(song.songId),
+            songKey: song.songId && cloudSongByLocalId.has(song.songId)
+              ? `song-id:${cloudSongByLocalId.get(song.songId)?.id}`
+              : song.songKey,
+          })),
+        })),
+      }),
+    });
+    await ensureCloudSyncResponse(response, "本地查词记录同步失败。");
+  }
+
+  if (localStudyDays.length > 0) {
+    const response = await fetch("/api/study/sync", {
+      method: "POST",
+      headers: createHeaders(token),
+      body: JSON.stringify({
+        days: localStudyDays.map((day) => ({
+          ...day,
+          learnedSongIds: day.learnedSongIds.map((songId) => mapSongId(songId) || songId),
+        })),
+      }),
+    });
+    await ensureCloudSyncResponse(response, "本地学习记录同步失败。");
+  }
+};
+
 type MeloState = {
   appMode: AppMode;
   view: ViewId;
@@ -203,6 +479,9 @@ type MeloState = {
   localSongs: UploadedSong[];
   playbackMode: PlaybackMode;
   isShuffle: boolean;
+  pronunciationBackgroundMode: PronunciationBackgroundMode;
+  lyricAnnotationsEnabled: boolean;
+  lyricAnnotations: LyricAnnotation[];
   favoriteSongs: FavoriteSong[];
   savedWords: SavedWord[];
   wordLookupStats: WordLookupStat[];
@@ -214,6 +493,7 @@ type MeloState = {
   authStatus: "idle" | "loading" | "ready" | "error";
   authError: string | null;
   setView: (view: ViewId) => void;
+  enterLocalMode: () => Promise<void>;
   showCloudLogin: () => void;
   setPlaying: (isPlaying: boolean) => void;
   loadCurrentUser: () => Promise<void>;
@@ -230,6 +510,9 @@ type MeloState = {
   handleSongEnded: () => "repeat-one" | "next" | "stop";
   togglePlaybackMode: () => void;
   toggleShuffle: () => void;
+  setPronunciationBackgroundMode: (mode: PronunciationBackgroundMode) => void;
+  setLyricAnnotationsEnabled: (enabled: boolean) => void;
+  recordLyricAnnotation: (annotation: Omit<LyricAnnotation, "id" | "lastLookedUpAt">) => void;
   consumePendingSeekTime: () => number | null;
   addLocalSongs: (songs: UploadedSong[]) => void;
   updateSongLyrics: (songId: string, lyrics: LyricLine[]) => Promise<UploadedSong | null>;
@@ -250,16 +533,19 @@ type MeloState = {
 
 export const useMeloStore = create<MeloState>((set, get) => ({
   appMode: "local",
-  view: "library",
+  view: "profile",
   isPlaying: true,
   isRecording: false,
   activeWord: null,
-  currentUser: localUser,
+  currentUser: null,
   profileStats: null,
   uploadedSong: null,
   localSongs: [],
   playbackMode: "repeat-all",
   isShuffle: false,
+  pronunciationBackgroundMode: readPronunciationBackgroundMode(),
+  lyricAnnotationsEnabled: readLyricAnnotationsEnabled(),
+  lyricAnnotations: readLyricAnnotations(),
   favoriteSongs: [],
   savedWords: [],
   wordLookupStats: [],
@@ -271,12 +557,38 @@ export const useMeloStore = create<MeloState>((set, get) => ({
   authStatus: "idle",
   authError: null,
   setView: (view) => set({ view, activeWord: null }),
-  showCloudLogin: () => set({ currentUser: null, authStatus: "idle", authError: null, view: "profile" }),
+  enterLocalMode: async () => {
+    clearAuthSession();
+    writeLocalModePreference();
+    set({
+      appMode: "local",
+      currentUser: localUser,
+      authStatus: "idle",
+      authError: null,
+      view: "library",
+    });
+    await Promise.all([
+      get().loadProfile(),
+      get().loadSavedWords(),
+      get().loadWordLookupStats(),
+      get().loadLocalSongs(),
+      get().loadFavoriteSongs(),
+    ]);
+  },
+  showCloudLogin: () => {
+    clearLocalModePreference();
+    set({ currentUser: null, authStatus: "idle", authError: null, view: "profile" });
+  },
   setPlaying: (isPlaying) => set({ isPlaying }),
   loadCurrentUser: async () => {
     const savedToken = readAuthToken();
     if (!savedToken) {
-      set({ appMode: "local", currentUser: localUser, authStatus: "idle" });
+      set({
+        appMode: "local",
+        currentUser: readLocalModePreference() ? localUser : null,
+        authStatus: "idle",
+        view: "profile",
+      });
       return;
     }
 
@@ -290,7 +602,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       set({ appMode: "cloud", currentUser: data.user, authStatus: "ready", authError: null });
     } catch {
       clearAuthSession();
-      set({ appMode: "local", currentUser: localUser, authStatus: "idle" });
+      set({
+        appMode: "local",
+        currentUser: readLocalModePreference() ? localUser : null,
+        authStatus: "idle",
+        view: "profile",
+      });
     }
   },
   loginWithEmail: async (payload) => {
@@ -307,8 +624,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         throw new Error(data.message || "登录失败，请稍后重试。");
       }
 
+      const syncToken = data.session?.token;
       writeAuthSession(data.session);
       set({ appMode: "cloud", currentUser: data.user, authStatus: "ready", authError: null });
+      const syncError = syncToken
+        ? await syncLocalDataToCloud(syncToken).catch((error) => error)
+        : null;
       await Promise.all([
         get().loadProfile(),
         get().loadSavedWords(),
@@ -316,6 +637,9 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         get().loadLocalSongs(),
         get().loadFavoriteSongs(),
       ]);
+      if (syncError) {
+        set({ authError: syncError instanceof Error ? `登录成功，但本地数据同步失败：${syncError.message}` : "登录成功，但本地数据同步失败。" });
+      }
       return true;
     } catch (error) {
       set({ authStatus: "error", authError: error instanceof Error ? error.message : "登录失败，请稍后重试。" });
@@ -336,8 +660,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         throw new Error(data.message || "注册失败，请稍后重试。");
       }
 
+      const syncToken = data.session?.token;
       writeAuthSession(data.session);
       set({ appMode: "cloud", currentUser: data.user, authStatus: "ready", authError: null });
+      const syncError = syncToken
+        ? await syncLocalDataToCloud(syncToken).catch((error) => error)
+        : null;
       await Promise.all([
         get().loadProfile(),
         get().loadSavedWords(),
@@ -345,6 +673,9 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         get().loadLocalSongs(),
         get().loadFavoriteSongs(),
       ]);
+      if (syncError) {
+        set({ authError: syncError instanceof Error ? `注册成功，但本地数据同步失败：${syncError.message}` : "注册成功，但本地数据同步失败。" });
+      }
       return true;
     } catch (error) {
       set({ authStatus: "error", authError: error instanceof Error ? error.message : "注册失败，请稍后重试。" });
@@ -382,8 +713,12 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         return false;
       }
 
+      const syncToken = data.session?.token;
       writeAuthSession(data.session);
       set({ appMode: "cloud", currentUser: data.user, authStatus: "ready", authError: null });
+      const syncError = syncToken
+        ? await syncLocalDataToCloud(syncToken).catch((error) => error)
+        : null;
       await Promise.all([
         get().loadProfile(),
         get().loadSavedWords(),
@@ -391,6 +726,9 @@ export const useMeloStore = create<MeloState>((set, get) => ({
         get().loadLocalSongs(),
         get().loadFavoriteSongs(),
       ]);
+      if (syncError) {
+        set({ authError: syncError instanceof Error ? `登录成功，但本地数据同步失败：${syncError.message}` : "登录成功，但本地数据同步失败。" });
+      }
       return true;
     } catch (error) {
       set({ authStatus: "error", authError: error instanceof Error ? error.message : "微信登录失败。" });
@@ -406,9 +744,11 @@ export const useMeloStore = create<MeloState>((set, get) => ({
       }).catch(() => null);
     }
     clearAuthSession();
+    clearLocalModePreference();
     set({
       appMode: "local",
-      currentUser: localUser,
+      currentUser: null,
+      view: "profile",
       profileStats: null,
       favoriteSongs: [],
       savedWords: [],
@@ -533,6 +873,37 @@ export const useMeloStore = create<MeloState>((set, get) => ({
             : "repeat-all",
     })),
   toggleShuffle: () => set((state) => ({ isShuffle: !state.isShuffle })),
+  setPronunciationBackgroundMode: (mode) => {
+    writePronunciationBackgroundMode(mode);
+    set({ pronunciationBackgroundMode: mode });
+  },
+  setLyricAnnotationsEnabled: (enabled) => {
+    writeLyricAnnotationsEnabled(enabled);
+    set({ lyricAnnotationsEnabled: enabled });
+  },
+  recordLyricAnnotation: (annotation) => {
+    const now = new Date().toISOString();
+    const word = annotation.word.trim().toLowerCase();
+    const annotationId = [
+      annotation.songKey,
+      annotation.lineId || annotation.lineTime || "line",
+      annotation.wordIndex,
+      word,
+    ].join("::");
+    const nextAnnotation: LyricAnnotation = {
+      ...annotation,
+      id: annotationId,
+      word,
+      lastLookedUpAt: now,
+    };
+    const annotations = [
+      nextAnnotation,
+      ...get().lyricAnnotations.filter((item) => item.id !== annotationId),
+    ];
+
+    writeLyricAnnotations(annotations);
+    set({ lyricAnnotations: annotations });
+  },
   consumePendingSeekTime: () => {
     let seekTime: number | null = null;
     set((state) => {

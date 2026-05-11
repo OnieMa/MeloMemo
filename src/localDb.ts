@@ -23,6 +23,9 @@ type LocalStudyDayRecord = {
 
 type LocalWordLookupRecord = WordLookupStat;
 
+export type LocalSongSyncRecord = LocalSongRecord;
+export type LocalStudyDaySyncRecord = LocalStudyDayRecord;
+
 const DB_NAME = "melomemo-local";
 const DB_VERSION = 1;
 const SONG_STORE = "songs";
@@ -209,6 +212,11 @@ export const listLocalSongs = async () => {
     .map(localSongToUploadedSong);
 };
 
+export const listLocalSongSyncRecords = async () => {
+  const songs = await getAll<LocalSongRecord>(SONG_STORE);
+  return songs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+};
+
 export const deleteLocalSong = async (songId: string) => {
   await deleteRecord(SONG_STORE, songId);
 };
@@ -251,7 +259,63 @@ export const saveLocalVocabularyWord = (word: SavedWord) =>
 
 export const listLocalWordLookups = async () => {
   const words = await getAll<LocalWordLookupRecord>(WORD_LOOKUP_STORE);
-  return words.sort((a, b) => b.lookupCount - a.lookupCount || b.lastLookedUpAt.localeCompare(a.lastLookedUpAt));
+  return words
+    .map((item) => ({
+      ...item,
+      songCount: item.sourceSongs?.length ?? 0,
+    }))
+    .sort((a, b) => b.lookupCount - a.lookupCount || b.lastLookedUpAt.localeCompare(a.lastLookedUpAt));
+};
+
+export const listLocalStudyDays = () => getAll<LocalStudyDayRecord>(STUDY_STORE);
+
+const getWordLookupSongRef = (entry: {
+  sourceSong?: string;
+  sourceSongId?: string;
+  sourceTime?: number;
+  sourceLine?: string;
+}) => {
+  const songTitle = entry.sourceSong?.trim();
+
+  if (!songTitle && !entry.sourceSongId) {
+    return null;
+  }
+
+  return {
+    songKey: entry.sourceSongId ? `song-id:${entry.sourceSongId}` : `song-title:${songTitle}`,
+    songId: entry.sourceSongId,
+    songTitle: songTitle || "未命名歌曲",
+    sourceTime: entry.sourceTime,
+    sourceLine: entry.sourceLine,
+  };
+};
+
+const mergeWordLookupSongRefs = (
+  existing: WordLookupStat["sourceSongs"] = [],
+  entry: {
+    sourceSong?: string;
+    sourceSongId?: string;
+    sourceTime?: number;
+    sourceLine?: string;
+  },
+  lookedUpAt: string,
+) => {
+  const nextRef = getWordLookupSongRef(entry);
+
+  if (!nextRef) {
+    return existing;
+  }
+
+  const refs = new Map((existing ?? []).map((item) => [item.songKey, item]));
+  const previous = refs.get(nextRef.songKey);
+  refs.set(nextRef.songKey, {
+    ...previous,
+    ...nextRef,
+    lookupCount: (previous?.lookupCount ?? 0) + 1,
+    lastLookedUpAt: lookedUpAt,
+  });
+
+  return [...refs.values()].sort((a, b) => b.lastLookedUpAt.localeCompare(a.lastLookedUpAt));
 };
 
 export const recordLocalWordLookup = async (entry: {
@@ -261,13 +325,19 @@ export const recordLocalWordLookup = async (entry: {
   ukPhonetic?: string;
   partOfSpeech?: string;
   meaning: string;
+  sourceSong?: string;
+  sourceSongId?: string;
+  sourceTime?: number;
+  sourceLine?: string;
 }) => {
   const db = await openLocalDb();
   try {
     const word = entry.word.trim().toLowerCase();
+    const lookedUpAt = new Date().toISOString();
     const transaction = db.transaction(WORD_LOOKUP_STORE, "readwrite");
     const store = transaction.objectStore(WORD_LOOKUP_STORE);
     const existing = await requestToPromise<LocalWordLookupRecord | undefined>(store.get(word));
+    const sourceSongs = mergeWordLookupSongRefs(existing?.sourceSongs, entry, lookedUpAt);
     store.put({
       word,
       phonetic: entry.phonetic,
@@ -276,7 +346,9 @@ export const recordLocalWordLookup = async (entry: {
       partOfSpeech: entry.partOfSpeech,
       meaning: entry.meaning,
       lookupCount: (existing?.lookupCount ?? 0) + 1,
-      lastLookedUpAt: new Date().toISOString(),
+      lastLookedUpAt: lookedUpAt,
+      sourceSongs,
+      songCount: sourceSongs.length,
     });
     await transactionDone(transaction);
   } finally {

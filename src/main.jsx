@@ -213,6 +213,153 @@ function countLyricWords(text) {
   return splitLyricText(text).filter((token) => getLookupWord(token)).length;
 }
 
+function getSongAnnotationKey(song) {
+  if (!song) {
+    return "";
+  }
+
+  return song.id
+    ? `id:${song.id}`
+    : `song:${song.title?.trim().toLowerCase() || "unknown"}::${song.artist?.trim().toLowerCase() || "unknown"}`;
+}
+
+function getLyricAnnotationLineKey(line) {
+  return line?.id || (typeof line?.time === "number" ? `time:${line.time.toFixed(3)}` : "line");
+}
+
+function getCompactMeaning(meaning = "") {
+  return meaning
+    .split(/[;；。.\n]/)
+    .map((part) => part.trim())
+    .filter(Boolean)[0] || meaning;
+}
+
+function getSavedWordCreatedTime(item) {
+  const createdAt = item?._lastLearnedAt || item?.createdAt || item?.savedAt || item?.updatedAt || item?.id;
+  const timestamp = createdAt ? Date.parse(createdAt) : Number.NaN;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sortSavedWords(words, sortMode) {
+  const collator = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  return [...words].sort((a, b) => {
+    if (sortMode === "name") {
+      return collator.compare(a.word || "", b.word || "") || getSavedWordCreatedTime(b) - getSavedWordCreatedTime(a);
+    }
+
+    return getSavedWordCreatedTime(b) - getSavedWordCreatedTime(a) || collator.compare(a.word || "", b.word || "");
+  });
+}
+
+function getSavedWordSongGroup(item) {
+  const name = item.sourceSong || "未标注来源";
+  return {
+    key: item.sourceSongId ? `song-id:${item.sourceSongId}` : `song-name:${name}`,
+    name,
+  };
+}
+
+function getSavedWordSongReferences(item, lookupStats = []) {
+  const normalizedWord = item.word?.toLowerCase();
+  const lookup = lookupStats.find((stat) => stat.word?.toLowerCase() === normalizedWord);
+  const refs = new Map();
+
+  for (const ref of lookup?.sourceSongs ?? []) {
+    const songTitle = ref.songTitle || ref.sourceSong;
+    const songKey = ref.songKey || (ref.songId ? `song-id:${ref.songId}` : `song-name:${songTitle}`);
+
+    if (!songTitle || !songKey) {
+      continue;
+    }
+
+    refs.set(songKey, {
+      songKey,
+      songId: ref.songId,
+      songTitle,
+      lookupCount: ref.lookupCount ?? 1,
+      lastLookedUpAt: ref.lastLookedUpAt,
+      sourceTime: ref.sourceTime,
+      sourceLine: ref.sourceLine,
+    });
+  }
+
+  if (item.sourceSong || item.sourceSongId) {
+    const source = getSavedWordSongGroup(item);
+    if (!refs.has(source.key)) {
+      refs.set(source.key, {
+        songKey: source.key,
+        songId: item.sourceSongId,
+        songTitle: source.name,
+        lookupCount: 1,
+        lastLookedUpAt: item.createdAt || item.savedAt || item.updatedAt || item.id || "",
+        sourceTime: item.sourceTime,
+        sourceLine: item.sourceLine,
+      });
+    }
+  }
+
+  if (refs.size === 0) {
+    refs.set("song-name:未标注来源", {
+      songKey: "song-name:未标注来源",
+      songTitle: "未标注来源",
+      lookupCount: 1,
+      lastLookedUpAt: item.createdAt || item.savedAt || item.updatedAt || item.id || "",
+    });
+  }
+
+  return [...refs.values()].sort((a, b) => {
+    const timeDiff = Date.parse(b.lastLookedUpAt || "") - Date.parse(a.lastLookedUpAt || "");
+    return Number.isFinite(timeDiff) && timeDiff !== 0 ? timeDiff : a.songTitle.localeCompare(b.songTitle, "zh-Hans-CN");
+  });
+}
+
+function groupSavedWordsBySong(words, sortMode, lookupStats = []) {
+  const collator = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
+  const groups = new Map();
+
+  for (const item of words) {
+    for (const ref of getSavedWordSongReferences(item, lookupStats)) {
+      const group = groups.get(ref.songKey) || {
+        key: ref.songKey,
+        name: ref.songTitle,
+        latestTime: 0,
+        words: [],
+        wordKeys: new Set(),
+      };
+      const wordKey = item.word?.toLowerCase();
+
+      if (!group.wordKeys.has(wordKey)) {
+        group.words.push({
+          ...item,
+          sourceSong: ref.songTitle,
+          sourceSongId: ref.songId,
+          sourceTime: ref.sourceTime ?? item.sourceTime,
+          sourceLine: ref.sourceLine ?? item.sourceLine,
+          _lastLearnedAt: ref.lastLookedUpAt,
+        });
+        group.wordKeys.add(wordKey);
+      }
+      group.latestTime = Math.max(group.latestTime, getSavedWordCreatedTime({ ...item, _lastLearnedAt: ref.lastLookedUpAt }));
+      groups.set(ref.songKey, group);
+    }
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      key: group.key,
+      name: group.name,
+      latestTime: group.latestTime,
+      words: sortSavedWords(group.words, sortMode),
+    }))
+    .sort((a, b) => {
+      if (sortMode === "name") {
+        return collator.compare(a.name, b.name) || b.latestTime - a.latestTime;
+      }
+
+      return b.latestTime - a.latestTime || collator.compare(a.name, b.name);
+    });
+}
+
 function clampPopoverPosition({ x, y, width = 320, height = 360, margin = 18 }) {
   return {
     x: Math.min(window.innerWidth - width - margin, Math.max(margin, x)),
@@ -1557,7 +1704,7 @@ const playbackRateOptions = [
 ];
 
 function PlayerView({ showLyrics = true }) {
-  const { appMode, activeWord, isPlaying, isRecording, currentUser, setPlaying, togglePlaying, toggleRecording, toggleWord, saveWord, savedWords, uploadedSong, localSongs, playbackMode, isShuffle, playNextSong, playPreviousSong, handleSongEnded, togglePlaybackMode, toggleShuffle, pendingSeekTime, consumePendingSeekTime, favoriteSongs, toggleFavoriteSong, recordStudyHeartbeat, loadWordLookupStats, recordWordLookup, updateSongLyrics, setView } = useMeloStore();
+  const { appMode, activeWord, isPlaying, isRecording, currentUser, setPlaying, togglePlaying, toggleRecording, toggleWord, saveWord, savedWords, uploadedSong, localSongs, playbackMode, isShuffle, pronunciationBackgroundMode, lyricAnnotationsEnabled, lyricAnnotations, recordLyricAnnotation, playNextSong, playPreviousSong, handleSongEnded, togglePlaybackMode, toggleShuffle, pendingSeekTime, consumePendingSeekTime, favoriteSongs, toggleFavoriteSong, recordStudyHeartbeat, loadWordLookupStats, recordWordLookup, updateSongLyrics, setView } = useMeloStore();
   const audioRef = useRef(null);
   const activeLyricRef = useRef(null);
   const syncedLyricsRef = useRef(null);
@@ -1575,6 +1722,7 @@ function PlayerView({ showLyrics = true }) {
   const singerStopTimerRef = useRef(null);
   const studyLastTickRef = useRef(Date.now());
   const studyPendingSecondsRef = useRef(0);
+  const pronunciationBackgroundRef = useRef({ mode: null, shouldResume: false });
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(225);
   const [volume, setVolume] = useState(0.7);
@@ -1610,6 +1758,20 @@ function PlayerView({ showLyrics = true }) {
   const currentSongFavoriteId = currentSong.id
     ? `id:${currentSong.id}`
     : `song:${currentSong.title.trim().toLowerCase()}::${currentSong.artist.trim().toLowerCase()}`;
+  const currentSongAnnotationKey = getSongAnnotationKey(currentSong);
+  const currentSongAnnotations = useMemo(
+    () => lyricAnnotations.filter((annotation) => annotation.songKey === currentSongAnnotationKey),
+    [currentSongAnnotationKey, lyricAnnotations],
+  );
+  const lyricAnnotationMap = useMemo(() => {
+    const map = new Map();
+
+    currentSongAnnotations.forEach((annotation) => {
+      map.set(`${annotation.lineId || annotation.lineTime || "line"}::${annotation.wordIndex}::${annotation.word}`, annotation);
+    });
+
+    return map;
+  }, [currentSongAnnotations]);
   const isCurrentSongFavorite = Boolean(uploadedSong) && favoriteSongs.some((song) => song.favoriteId === currentSongFavoriteId);
   const currentRateLabel = playbackRateOptions.find((option) => option.value === playbackRate)?.label || "1.0x";
   const currentPlaylistIndex = uploadedSong
@@ -1694,7 +1856,7 @@ function PlayerView({ showLyrics = true }) {
   };
   const jumpToLyricLineFromRow = (event, line) => {
     const target = event.target;
-    if (target instanceof Element && target.closest(".lyric-word, .lyric-jump-zone, button")) {
+    if (target instanceof Element && target.closest(".lyric-word, .lyric-word-wrap, .lyric-jump-zone, button")) {
       return;
     }
 
@@ -1875,6 +2037,45 @@ function PlayerView({ showLyrics = true }) {
     }
   };
 
+  const preparePronunciationBackground = () => {
+    const audio = audioRef.current;
+
+    if (pronunciationBackgroundMode === "pause") {
+      const previous = pronunciationBackgroundRef.current;
+      const shouldResume = previous.mode === "pause"
+        ? previous.shouldResume
+        : Boolean(audio && !audio.paused && !audio.ended);
+
+      if (audio && !audio.paused) {
+        audio.pause();
+      }
+      if (shouldResume) {
+        setPlaying(false);
+      }
+
+      pronunciationBackgroundRef.current = { mode: "pause", shouldResume };
+      return;
+    }
+
+    pronunciationBackgroundRef.current = { mode: "duck", shouldResume: false };
+    duckSongVolume(0.14);
+  };
+
+  const restorePronunciationBackground = () => {
+    const context = pronunciationBackgroundRef.current;
+    pronunciationBackgroundRef.current = { mode: null, shouldResume: false };
+
+    if (context.mode === "pause") {
+      if (context.shouldResume && audioRef.current && uploadedSong?.audioUrl) {
+        setPlaying(true);
+        audioRef.current.play().catch(() => setPlaying(false));
+      }
+      return;
+    }
+
+    restoreSongVolume();
+  };
+
   const stopAudioRef = (audioRefToStop) => {
     if (!audioRefToStop.current) {
       return;
@@ -1889,22 +2090,24 @@ function PlayerView({ showLyrics = true }) {
 
   const pronounceWord = async (word, lang = "en-US") => {
     stopAudioRef(ttsAudioRef);
+    if (appMode === "local" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
 
     setWordPopover((current) =>
       current?.word === word ? { ...current, ttsStatus: "loading", ttsError: "", ttsMeta: { lang } } : current,
     );
-    duckSongVolume(0.14);
+    preparePronunciationBackground();
 
     try {
       if (appMode === "local" && "speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(word);
         utterance.lang = lang;
         utterance.rate = 0.82;
         utterance.volume = 1;
-        utterance.onend = restoreSongVolume;
+        utterance.onend = restorePronunciationBackground;
         utterance.onerror = () => {
-          restoreSongVolume();
+          restorePronunciationBackground();
           setWordPopover((current) =>
             current?.word === word ? { ...current, ttsStatus: "error", ttsError: `浏览器${getTtsAccentLabel(lang)}发音暂时不可用。` } : current,
           );
@@ -1949,9 +2152,9 @@ function PlayerView({ showLyrics = true }) {
       const pronunciationAudio = new Audio(data.url);
       ttsAudioRef.current = pronunciationAudio;
       pronunciationAudio.volume = 1;
-      pronunciationAudio.onended = restoreSongVolume;
+      pronunciationAudio.onended = restorePronunciationBackground;
       pronunciationAudio.onerror = () => {
-        restoreSongVolume();
+        restorePronunciationBackground();
         setWordPopover((current) =>
           current?.word === word ? { ...current, ttsStatus: "error", ttsError: `讯飞${getTtsAccentLabel(lang)}音频播放失败，请稍后重试。` } : current,
         );
@@ -1982,7 +2185,7 @@ function PlayerView({ showLyrics = true }) {
             }
           : current,
       );
-      restoreSongVolume();
+      restorePronunciationBackground();
     }
   };
 
@@ -2017,6 +2220,18 @@ function PlayerView({ showLyrics = true }) {
       clipStartTime: Math.max(0, wordTime - Math.min(0.22, wordStep * 0.4)),
       clipEndTime: Math.min(lineEndTime, wordTime + Math.max(0.65, wordStep * 1.25)),
     };
+  };
+
+  const getLyricAnnotation = (line, wordIndex, word) => {
+    const normalizedWord = getLookupWord(word);
+    if (!normalizedWord) {
+      return null;
+    }
+
+    const lineKey = getLyricAnnotationLineKey(line);
+    return lyricAnnotationMap.get(`${lineKey}::${wordIndex}::${normalizedWord}`)
+      || lyricAnnotationMap.get(`${line?.time ?? "line"}::${wordIndex}::${normalizedWord}`)
+      || null;
   };
 
   const playSingerWord = () => {
@@ -2135,7 +2350,21 @@ function PlayerView({ showLyrics = true }) {
     void pronounceWord(word);
 
     try {
-      const response = await fetch(`/api/dictionary/${encodeURIComponent(word)}`, {
+      const lookupParams = new URLSearchParams();
+      if (sourceSong) {
+        lookupParams.set("sourceSong", sourceSong);
+      }
+      if (uploadedSong?.id) {
+        lookupParams.set("sourceSongId", uploadedSong.id);
+      }
+      if (Number.isFinite(timing.wordTime)) {
+        lookupParams.set("sourceTime", String(timing.wordTime));
+      }
+      if (line?.text) {
+        lookupParams.set("sourceLine", line.text);
+      }
+      const lookupQuery = lookupParams.toString();
+      const response = await fetch(`/api/dictionary/${encodeURIComponent(word)}${lookupQuery ? `?${lookupQuery}` : ""}`, {
         headers: getCurrentUserHeaders(),
       });
       if (!response.ok) {
@@ -2157,7 +2386,24 @@ function PlayerView({ showLyrics = true }) {
         meaning: data.meaning,
         lookupCount: 1,
         lastLookedUpAt: new Date().toISOString(),
+        sourceSong,
+        sourceSongId: uploadedSong?.id,
+        sourceTime: timing.wordTime,
+        sourceLine: line?.text || rawWord,
       });
+      if (uploadedSong && line && typeof occurrence?.wordIndex === "number") {
+        recordLyricAnnotation({
+          songKey: currentSongAnnotationKey,
+          lineId: getLyricAnnotationLineKey(line),
+          lineTime: typeof line.time === "number" ? line.time : undefined,
+          word: data.word || word,
+          wordIndex: occurrence.wordIndex,
+          phonetic: data.usPhonetic || data.phonetic,
+          meaning: data.meaning,
+          partOfSpeech: data.partOfSpeech,
+          sourceLine: line.text,
+        });
+      }
       void loadWordLookupStats();
     } catch (error) {
       setWordPopover((current) =>
@@ -2198,9 +2444,11 @@ function PlayerView({ showLyrics = true }) {
     );
   };
 
-  const renderClickableLyric = (text, line) => {
+  const renderClickableLyric = (text, line, lineIndex) => {
     const wordCount = countLyricWords(text);
     let wordIndex = -1;
+    const isActiveLine = lineIndex === activeLineIndex;
+    const shouldShowAnnotationHints = lyricAnnotationsEnabled && Math.abs(lineIndex - activeLineIndex) <= 2;
 
     return splitLyricText(text).map((token, index) => {
       const word = getLookupWord(token);
@@ -2210,10 +2458,30 @@ function PlayerView({ showLyrics = true }) {
       }
 
       wordIndex += 1;
-      return (
-        <button className="lyric-word" key={`${token}-${index}`} type="button" onClick={(event) => openWordPopover(event, token, { line, wordIndex, wordCount })}>
+      const annotation = shouldShowAnnotationHints ? getLyricAnnotation(line, wordIndex, word) : null;
+      const annotationText = annotation
+        ? `${annotation.phonetic || "暂无音标"} · ${getCompactMeaning(annotation.meaning)}`
+        : "";
+      const wordButton = (
+        <button
+          className={`lyric-word ${annotation ? "annotated" : ""}`}
+          key={`${token}-${index}-button`}
+          type="button"
+          onClick={(event) => openWordPopover(event, token, { line, wordIndex, wordCount })}
+        >
           {token}
         </button>
+      );
+
+      if (!annotation || !isActiveLine) {
+        return wordButton;
+      }
+
+      return (
+        <span className="lyric-word-wrap" key={`${token}-${index}`}>
+          <span className="lyric-word-annotation">{annotationText}</span>
+          {wordButton}
+        </span>
       );
     });
   };
@@ -2227,7 +2495,7 @@ function PlayerView({ showLyrics = true }) {
       const target = event.target;
       const isInsideWordPopover = wordPopoverRef.current?.contains(target);
       const isInsideDemoPopover = demoWordPopoverRef.current?.contains(target);
-      const isLyricWord = target.closest?.(".lyric-word, .smart-word");
+      const isLyricWord = target.closest?.(".lyric-word, .lyric-word-wrap, .smart-word");
 
       if (wordPopover && !isInsideWordPopover && !isLyricWord) {
         setWordPopover(null);
@@ -2625,7 +2893,7 @@ function PlayerView({ showLyrics = true }) {
 	                    >
 	                      <Icon name="play_arrow" filled />
 	                    </button>
-	                    {renderClickableLyric(line.text, line)}
+		                    {renderClickableLyric(line.text, line, index)}
 	                  </p>
                 ))}
               </div>
@@ -2832,8 +3100,67 @@ function PlayerView({ showLyrics = true }) {
 function DiscoverView() {
   const { savedWords, vocabularyStatus, localSongs, openSongAtTime, profileStats: accountStats, wordLookupStats, wordLookupStatus } = useMeloStore();
   const [showAllLookupWords, setShowAllLookupWords] = useState(false);
+  const [vocabularyViewMode, setVocabularyViewMode] = useState("song");
+  const [vocabularySortMode, setVocabularySortMode] = useState("added");
+  const [expandedVocabularySong, setExpandedVocabularySong] = useState(null);
   const studyDuration = getStudyDurationParts(accountStats?.totalStudySeconds ?? 0);
   const visibleLookupWords = showAllLookupWords ? wordLookupStats : wordLookupStats.slice(0, 4);
+  const sortedSavedWords = sortSavedWords(savedWords, vocabularySortMode);
+  const groupedSavedWords = groupSavedWordsBySong(savedWords, vocabularySortMode, wordLookupStats);
+  const renderSavedWordCard = (item, { showSongRefs = false } = {}) => {
+    const sourceSong = item.sourceSongId
+      ? localSongs.find((song) => song.id === item.sourceSongId)
+      : null;
+    const key = item.id || `${item.word}-${item.sourceSongId || item.sourceSong || "unknown"}-${item.sourceTime ?? "time"}`;
+    const songRefs = showSongRefs ? getSavedWordSongReferences(item, wordLookupStats).filter((ref) => ref.songTitle !== "未标注来源") : [];
+
+    return (
+      <article className="saved-word-card" key={key}>
+        <div>
+          <span>SmartWord</span>
+          <h3>{item.word}</h3>
+          <p>{item.phonetic || "暂无音标"} · {item.meaning}</p>
+        </div>
+        {item.example && <em>"{item.example}"</em>}
+        {item.sourceLine && <em className="source-line">"{item.sourceLine}"</em>}
+        {songRefs.length > 0 && (
+          <div className="saved-word-songs">
+            <strong>学习过 {songRefs.length} 首歌</strong>
+            <div>
+              {songRefs.slice(0, 4).map((ref) => {
+                const learnedSong = ref.songId
+                  ? localSongs.find((song) => song.id === ref.songId)
+                  : null;
+
+                return (
+                  <button
+                    type="button"
+                    key={ref.songKey}
+                    disabled={!learnedSong}
+                    onClick={() => learnedSong && openSongAtTime(learnedSong, ref.sourceTime)}
+                  >
+                    <span>{ref.songTitle}</span>
+                    <small>{ref.lookupCount} 次</small>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {item.sourceSong && <small>{item.sourceSong}{typeof item.sourceTime === "number" ? ` · ${formatTime(item.sourceTime)}` : ""}</small>}
+        {item.sourceSongId && (
+          <button
+            className="word-jump-btn"
+            type="button"
+            disabled={!sourceSong}
+            onClick={() => sourceSong && openSongAtTime(sourceSong, item.sourceTime)}
+          >
+            {sourceSong ? "跳转到歌词位置" : "本地歌曲未加载"}
+          </button>
+        )}
+      </article>
+    );
+  };
 
   return (
     <section className="view">
@@ -2867,6 +3194,9 @@ function DiscoverView() {
               <div>
                 <h3>{item.word}</h3>
                 <p>{item.phonetic || item.usPhonetic || "暂无音标"} · {item.meaning}</p>
+                {(item.songCount || item.sourceSongs?.length) > 0 && (
+                  <small>学习过 {item.songCount || item.sourceSongs.length} 首歌</small>
+                )}
               </div>
               <span className="lookup-count">{item.lookupCount} 次</span>
             </article>
@@ -2882,41 +3212,88 @@ function DiscoverView() {
       </div>
       <section className="saved-vocabulary">
         <SectionHead title="我的生词本" subtitle="从歌词中点击收藏的单词会同步保存在这里" />
+        {savedWords.length > 0 && (
+          <div className="vocabulary-toolbar" aria-label="生词本展示设置">
+            <div className="vocabulary-control">
+              <span>展示</span>
+              <div className="setting-segmented">
+                <button
+                  type="button"
+                  className={vocabularyViewMode === "song" ? "active" : ""}
+                  onClick={() => setVocabularyViewMode("song")}
+                >
+                  按歌曲
+                </button>
+                <button
+                  type="button"
+                  className={vocabularyViewMode === "word" ? "active" : ""}
+                  onClick={() => setVocabularyViewMode("word")}
+                >
+                  按单词
+                </button>
+              </div>
+            </div>
+            <div className="vocabulary-control">
+              <span>排序</span>
+              <div className="setting-segmented">
+                <button
+                  type="button"
+                  className={vocabularySortMode === "added" ? "active" : ""}
+                  onClick={() => setVocabularySortMode("added")}
+                >
+                  添加时间
+                </button>
+                <button
+                  type="button"
+                  className={vocabularySortMode === "name" ? "active" : ""}
+                  onClick={() => setVocabularySortMode("name")}
+                >
+                  名称
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {vocabularyStatus === "loading" && <p className="empty-note">正在读取生词本...</p>}
         {vocabularyStatus === "error" && <p className="empty-note">暂时无法连接生词本服务，请确认后端已启动。</p>}
         {vocabularyStatus !== "loading" && savedWords.length === 0 && (
           <p className="empty-note">还没有收藏单词。去歌词掌握页点击 SmartWord，把第一个单词放进来。</p>
         )}
-        {savedWords.length > 0 && (
-          <div className="saved-word-grid">
-            {savedWords.map((item) => {
-              const sourceSong = item.sourceSongId
-                ? localSongs.find((song) => song.id === item.sourceSongId)
-                : null;
+        {savedWords.length > 0 && vocabularyViewMode === "song" && (
+          <div className="saved-song-list">
+            {groupedSavedWords.map((group) => {
+              const isOpen = expandedVocabularySong === group.key;
 
               return (
-                <article className="saved-word-card" key={item.word}>
-                  <div>
-                    <span>SmartWord</span>
-                    <h3>{item.word}</h3>
-                    <p>{item.phonetic || "暂无音标"} · {item.meaning}</p>
-                  </div>
-                  {item.example && <em>"{item.example}"</em>}
-                  {item.sourceLine && <em className="source-line">"{item.sourceLine}"</em>}
-                  {item.sourceSong && <small>{item.sourceSong}{typeof item.sourceTime === "number" ? ` · ${formatTime(item.sourceTime)}` : ""}</small>}
-                  {item.sourceSongId && (
-                    <button
-                      className="word-jump-btn"
-                      type="button"
-                      disabled={!sourceSong}
-                      onClick={() => sourceSong && openSongAtTime(sourceSong, item.sourceTime)}
-                    >
-                      {sourceSong ? "跳转到歌词位置" : "本地歌曲未加载"}
-                    </button>
+                <article className="saved-song-group" key={group.key}>
+                  <button
+                    className="saved-song-head"
+                    type="button"
+                    aria-expanded={isOpen}
+                    onClick={() => setExpandedVocabularySong(isOpen ? null : group.key)}
+                  >
+                    <span className="saved-song-icon"><Icon name="album" /></span>
+                    <span className="saved-song-copy">
+                      <strong>{group.name}</strong>
+                      <small>{group.words.length} 个生词 · {vocabularySortMode === "name" ? "按名称排序" : "按添加时间排序"}</small>
+                    </span>
+                    <Icon name={isOpen ? "expand_less" : "expand_more"} />
+                  </button>
+                  {isOpen && (
+                    <div className="saved-song-words">
+                      <div className="saved-word-grid">
+                        {group.words.map((item) => renderSavedWordCard(item))}
+                      </div>
+                    </div>
                   )}
                 </article>
               );
             })}
+          </div>
+        )}
+        {savedWords.length > 0 && vocabularyViewMode === "word" && (
+          <div className="saved-word-grid">
+            {sortedSavedWords.map((item) => renderSavedWordCard(item, { showSongRefs: true }))}
           </div>
         )}
       </section>
@@ -2992,7 +3369,7 @@ function WechatQr({ sessionId, qrImageUrl }) {
 }
 
 function ProfileLoginView() {
-  const { authStatus, authError, loginWithEmail, registerWithEmail, startWechatLogin, checkWechatLogin } = useMeloStore();
+  const { authStatus, authError, enterLocalMode, loginWithEmail, registerWithEmail, startWechatLogin, checkWechatLogin } = useMeloStore();
   const [mode, setMode] = useState("login");
   const [form, setForm] = useState({ email: "", password: "", confirmPassword: "", displayName: "" });
   const [formError, setFormError] = useState("");
@@ -3060,6 +3437,17 @@ function ProfileLoginView() {
             <p>同步收藏歌曲、生词本和学习曲线。微信扫码登录会直接进入你的音乐学习档案。</p>
           </div>
 
+          <div className="local-mode-box">
+            <div>
+              <strong>本地使用模式</strong>
+              <span>歌曲、生词、收藏和学习记录只保存在这台设备。</span>
+            </div>
+            <button className="primary-btn light" type="button" onClick={enterLocalMode}>
+              <Icon name="offline_pin" />
+              本地使用模式
+            </button>
+          </div>
+
           <div className="wechat-login-box">
             <WechatQr sessionId={wechatSession?.sessionId} qrImageUrl={wechatSession?.qrImageUrl} />
             <div>
@@ -3109,7 +3497,7 @@ function ProfileLoginView() {
 }
 
 function ProfileView() {
-  const { appMode, currentUser, profileStats: accountStats, profileStatus, favoriteSongs, setUploadedSong, setView, logout, showCloudLogin } = useMeloStore();
+  const { appMode, currentUser, profileStats: accountStats, profileStatus, favoriteSongs, pronunciationBackgroundMode, lyricAnnotationsEnabled, setPronunciationBackgroundMode, setLyricAnnotationsEnabled, setUploadedSong, setView, logout, showCloudLogin } = useMeloStore();
   if (!currentUser) {
     return <ProfileLoginView />;
   }
@@ -3201,6 +3589,62 @@ function ProfileView() {
             ) : (
               <p className="empty-note profile-empty-note">还没有收藏歌曲。播放栏点亮爱心后，歌曲会出现在这里。</p>
             )}
+          </section>
+
+          <section className="playback-settings-panel">
+            <div className="section-head compact">
+              <h2>播放设置</h2>
+            </div>
+            <div className="setting-row">
+              <span className="row-icon secondary"><Icon name="record_voice_over" /></span>
+              <div>
+                <strong>单词发音时</strong>
+                <small>背景音乐处理</small>
+              </div>
+              <div className="setting-segmented" role="group" aria-label="单词发音时背景音乐处理">
+                <button
+                  type="button"
+                  className={pronunciationBackgroundMode === "duck" ? "active" : ""}
+                  aria-pressed={pronunciationBackgroundMode === "duck"}
+                  onClick={() => setPronunciationBackgroundMode("duck")}
+                >
+                  压低
+                </button>
+                <button
+                  type="button"
+                  className={pronunciationBackgroundMode === "pause" ? "active" : ""}
+                  aria-pressed={pronunciationBackgroundMode === "pause"}
+                  onClick={() => setPronunciationBackgroundMode("pause")}
+                >
+                  暂停
+                </button>
+              </div>
+            </div>
+            <div className="setting-row">
+              <span className="row-icon primary"><Icon name="lyrics" /></span>
+              <div>
+                <strong>已查词注释</strong>
+                <small>当前歌词行显示音标和释义</small>
+              </div>
+              <div className="setting-segmented" role="group" aria-label="歌词滚动时显示已查询注释">
+                <button
+                  type="button"
+                  className={lyricAnnotationsEnabled ? "active" : ""}
+                  aria-pressed={lyricAnnotationsEnabled}
+                  onClick={() => setLyricAnnotationsEnabled(true)}
+                >
+                  开
+                </button>
+                <button
+                  type="button"
+                  className={!lyricAnnotationsEnabled ? "active" : ""}
+                  aria-pressed={!lyricAnnotationsEnabled}
+                  onClick={() => setLyricAnnotationsEnabled(false)}
+                >
+                  关
+                </button>
+              </div>
+            </div>
           </section>
 
           <section className="profile-groups">

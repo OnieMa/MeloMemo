@@ -1600,6 +1600,39 @@ p {
   font: inherit;
 }
 
+.lyric-word-wrap {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: baseline;
+}
+
+.lyric-word-annotation {
+  max-width: 11rem;
+  margin-bottom: 0.3rem;
+  padding: 0.28rem 0.48rem;
+  overflow: hidden;
+  border-radius: 999px;
+  color: var(--secondary);
+  background: color-mix(in srgb, var(--surface-strong) 88%, transparent);
+  box-shadow: 0 10px 28px rgba(0, 103, 100, 0.1);
+  font-family: "Be Vietnam Pro", sans-serif;
+  font-size: clamp(0.68rem, 1vw, 0.82rem);
+  font-weight: 850;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lyric-word.annotated {
+  color: color-mix(in srgb, currentColor 72%, var(--primary));
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--secondary) 58%, transparent);
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.16em;
+}
+
 .lyric-word:hover,
 .lyric-word:focus-visible {
   color: var(--primary);
@@ -2362,6 +2395,14 @@ p {
   color: var(--muted);
 }
 
+.word-list small {
+  display: block;
+  margin-top: 6px;
+  color: color-mix(in srgb, var(--secondary) 76%, var(--muted));
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
 .lookup-count {
   min-width: 54px;
   min-height: 34px;
@@ -2381,12 +2422,103 @@ p {
   margin-top: 18px;
 }
 
+.vocabulary-toolbar {
+  margin: 0 0 18px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.vocabulary-control {
+  min-width: min(100%, 280px);
+  padding: 8px 10px 8px 16px;
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr);
+  align-items: center;
+  gap: 12px;
+  border-radius: 999px;
+  background: var(--surface-card);
+  box-shadow: 0 18px 46px rgba(85, 67, 207, 0.06);
+  backdrop-filter: blur(20px);
+}
+
+.vocabulary-control > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
 .empty-note {
   padding: 28px;
   border-radius: 32px;
   color: var(--muted);
   background: var(--surface-card);
   backdrop-filter: blur(20px);
+}
+
+.saved-song-list {
+  display: grid;
+  gap: 14px;
+}
+
+.saved-song-group {
+  overflow: hidden;
+  border-radius: 28px;
+  background: var(--surface-card);
+  box-shadow: 0 24px 70px rgba(85, 67, 207, 0.07);
+  backdrop-filter: blur(20px);
+}
+
+.saved-song-head {
+  width: 100%;
+  min-height: 88px;
+  padding: 18px 22px;
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 16px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+}
+
+.saved-song-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.saved-song-copy {
+  min-width: 0;
+}
+
+.saved-song-copy strong,
+.saved-song-copy small {
+  display: block;
+}
+
+.saved-song-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1.05rem;
+}
+
+.saved-song-copy small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.saved-song-words {
+  padding: 0 18px 18px;
 }
 
 .saved-word-grid {
@@ -2428,6 +2560,60 @@ p {
 .saved-word-card .source-line {
   padding-left: 12px;
   border-left: 3px solid color-mix(in srgb, var(--primary) 38%, transparent);
+}
+
+.saved-word-songs {
+  display: grid;
+  gap: 10px;
+}
+
+.saved-word-songs > strong {
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.saved-word-songs > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.saved-word-songs button {
+  max-width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  color: var(--secondary);
+  background: color-mix(in srgb, var(--secondary) 11%, transparent);
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.saved-word-songs button:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.saved-word-songs button span {
+  max-width: 150px;
+  overflow: hidden;
+  color: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: inherit;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.saved-word-songs button small {
+  margin: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font-size: 0.72rem;
 }
 
 .saved-word-card small {
@@ -2698,7 +2884,7 @@ p {
 
 .login-card {
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: 1fr auto auto;
   gap: 28px;
 }
 
@@ -2732,6 +2918,41 @@ p {
   align-items: center;
   border-radius: 28px;
   background: color-mix(in srgb, var(--surface-high) 58%, transparent);
+}
+
+.local-mode-box {
+  min-height: 132px;
+  padding: 22px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  border-radius: 28px;
+  color: white;
+  background: linear-gradient(135deg, var(--secondary), var(--primary));
+  box-shadow: 0 22px 48px rgba(0, 103, 100, 0.16);
+}
+
+.local-mode-box strong,
+.local-mode-box span {
+  display: block;
+}
+
+.local-mode-box strong {
+  font-size: 1.22rem;
+}
+
+.local-mode-box span {
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.82);
+  line-height: 1.6;
+}
+
+.local-mode-box .primary-btn {
+  min-width: 172px;
+  color: var(--secondary);
+  background: white;
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.12);
 }
 
 .wechat-login-box .text-btn {
@@ -2977,12 +3198,18 @@ p {
   border-radius: 36px;
 }
 
-.favorite-songs-panel {
+.favorite-songs-panel,
+.playback-settings-panel {
   padding: 22px;
   border-radius: 36px;
   background: var(--surface-card);
   box-shadow: 0 18px 50px rgba(85, 67, 207, 0.08);
   backdrop-filter: blur(24px);
+}
+
+.playback-settings-panel {
+  display: grid;
+  gap: 12px;
 }
 
 .favorite-song-list {
@@ -3033,6 +3260,52 @@ p {
 
 .profile-empty-note {
   margin: 4px 0 0;
+}
+
+.setting-row {
+  min-height: 78px;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  border-radius: 26px;
+  background: color-mix(in srgb, var(--surface-high) 34%, transparent);
+}
+
+.setting-row strong,
+.setting-row small {
+  display: block;
+}
+
+.setting-row small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.setting-segmented {
+  padding: 5px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(68px, 1fr));
+  gap: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--secondary) 10%, transparent);
+}
+
+.setting-segmented button {
+  min-height: 42px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 850;
+}
+
+.setting-segmented button.active {
+  color: var(--secondary);
+  background: var(--surface-strong);
+  box-shadow: 0 12px 26px rgba(0, 103, 100, 0.1);
 }
 
 .profile-list-card h2 {
@@ -3283,6 +3556,42 @@ p {
     grid-template-columns: 1fr;
     justify-items: center;
     text-align: center;
+  }
+
+  .local-mode-box,
+  .setting-row {
+    grid-template-columns: 1fr;
+    justify-items: stretch;
+  }
+
+  .vocabulary-toolbar {
+    justify-content: stretch;
+  }
+
+  .vocabulary-control {
+    width: 100%;
+    grid-template-columns: 1fr;
+    border-radius: 24px;
+  }
+
+  .saved-song-head {
+    grid-template-columns: 42px minmax(0, 1fr) 28px;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .saved-song-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+  }
+
+  .local-mode-box {
+    text-align: center;
+  }
+
+  .setting-segmented {
+    width: 100%;
   }
 
   .wechat-login-box .text-btn {

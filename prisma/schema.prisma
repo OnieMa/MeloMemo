@@ -139,6 +139,7 @@ model UserWordLookup {
   partOfSpeech   String?
   meaning        String
   lookupCount    Int      @default(0)
+  sourceSongRefs String   @default("[]")
   lastLookedUpAt DateTime @default(now())
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
