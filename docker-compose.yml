@@ -1,25 +1,49 @@
+# 本地 Docker Compose 配置。
+# 适合在开发机或个人服务器上直接从源码构建镜像并启动。
 services:
   melomemo:
+    # 从当前仓库目录构建镜像，使用 Dockerfile 中的多阶段构建。
     build:
       context: .
       dockerfile: Dockerfile
+
+    # 本地构建后的镜像名。生产流水线会使用 docker-compose.prod.yml 拉 GHCR 镜像。
     image: melomemo:latest
+
+    # 固定容器名，便于执行 docker logs melomemo / docker exec melomemo。
     container_name: melomemo
+
+    # Docker daemon 重启或容器异常退出后自动拉起。
     restart: unless-stopped
+
+    # 宿主机 8787 -> 容器 8787。
+    # 如果本机端口冲突，可以改成 "8080:8787"。
     ports:
       - "8787:8787"
+
+    # 可选运行时环境变量文件。
+    # required: false 表示没有 .env.docker 时也能启动，适合先跑基础功能。
     env_file:
       - path: .env.docker
         required: false
+
+    # 这些变量覆盖镜像内默认值，保证 Compose 启动时路径和时区明确。
     environment:
       API_PORT: "8787"
       DATABASE_URL: "file:/app/data/melomemo.db"
       APP_TIME_ZONE: "Asia/Shanghai"
+
+    # 运行时持久化目录：
+    # - melomemo-data: SQLite 数据库
+    # - melomemo-uploads: 上传音频、封面、YouTube 下载文件、TTS 缓存
+    # - melomemo-dictionaries: 可选本地词典 CSV
     volumes:
       - melomemo-data:/app/data
       - melomemo-uploads:/app/server/uploads
       - melomemo-dictionaries:/app/server/dictionaries
 
+# 命名 volume 由 Docker 管理。
+# docker compose down 不会删除这些数据；docker compose down -v 才会删除。
 volumes:
   melomemo-data:
   melomemo-uploads:

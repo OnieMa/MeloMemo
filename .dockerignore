@@ -1,20 +1,30 @@
+# Git 元数据和系统临时文件不需要进入 Docker build context。
 .git
 .gitignore
 .DS_Store
 
+# 依赖和构建产物由 Dockerfile 在镜像内重新生成。
+# 把它们排除可以显著减少 docker build 上传上下文的体积。
 node_modules
 dist
 *.tsbuildinfo
 
+# 本地环境变量包含密钥，不能打进镜像。
+# Docker 运行时通过 .env.docker 或服务器环境变量注入。
 .env
 .env.docker
 .env.local
 .env*.local
 
+# 本地 SQLite 数据库不进入镜像。
+# 容器运行时数据库放在 /app/data，并通过 Docker volume 持久化。
 prisma/dev.db
 prisma/dev.db-journal
 
+# 上传文件和词典 CSV 都是运行时数据。
+# 它们由 volume 挂载，避免镜像膨胀，也避免构建时泄露用户数据。
 server/uploads
 server/dictionaries/*.csv
 
+# design.md 是本地设计草稿，当前不随 Docker 镜像发布。
 design.md

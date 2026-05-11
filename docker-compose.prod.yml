@@ -1,22 +1,47 @@
+# 生产部署 Compose 配置。
+# GitHub Actions 会把这个文件复制到服务器的 DEPLOY_PATH/docker-compose.yml。
+# 它不从源码 build，而是直接拉取 CI 构建并推送到 GHCR 的镜像。
 services:
   melomemo:
+    # MELOMEMO_IMAGE 由 GitHub Actions 远程执行时注入，值类似：
+    # ghcr.io/oniema/melomemo:<commit-sha>
+    # 本地手动运行时没有该变量，则回退到 latest。
     image: ${MELOMEMO_IMAGE:-ghcr.io/oniema/melomemo:latest}
+
+    # 固定容器名，方便服务器上查看日志和执行命令。
     container_name: melomemo
+
+    # 服务器重启或容器异常退出后自动恢复。
     restart: unless-stopped
+
+    # 宿主机端口可通过 MELOMEMO_PORT 覆盖。
+    # 默认 http://服务器IP:8787 访问。
     ports:
       - "${MELOMEMO_PORT:-8787}:8787"
+
+    # 服务器上的私密配置文件。
+    # 这个文件不由 Actions 覆盖，避免密钥被仓库内容重置。
     env_file:
       - path: .env.docker
         required: false
+
+    # 基础运行变量。
+    # DATABASE_URL 指向持久化 volume，APP_TIME_ZONE 用于学习日期统计。
     environment:
       API_PORT: "8787"
       DATABASE_URL: "file:/app/data/melomemo.db"
       APP_TIME_ZONE: "${APP_TIME_ZONE:-Asia/Shanghai}"
+
+    # 生产数据持久化：
+    # - 数据库、上传文件、词典文件都不跟随容器删除。
+    # - 更新镜像并重启容器不会丢数据。
     volumes:
       - melomemo-data:/app/data
       - melomemo-uploads:/app/server/uploads
       - melomemo-dictionaries:/app/server/dictionaries
 
+# 生产命名 volume。
+# 如需备份，优先备份这三个 volume。
 volumes:
   melomemo-data:
   melomemo-uploads:
