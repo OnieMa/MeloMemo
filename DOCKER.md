@@ -94,6 +94,77 @@ APP_TIME_ZONE=Asia/Shanghai
 docker build -t melomemo:latest .
 ```
 
+## GitHub Actions 自动构建和部署
+
+仓库已添加流水线：
+
+```text
+.github/workflows/docker-deploy.yml
+```
+
+触发方式：
+
+- push 到 `main` 分支。
+- 在 GitHub Actions 页面手动点击 `workflow_dispatch`。
+
+流水线会先构建镜像并推送到 GitHub Container Registry：
+
+```text
+ghcr.io/oniema/melomemo:latest
+ghcr.io/oniema/melomemo:<commit-sha>
+```
+
+如果只想自动生成镜像，不需要配置任何额外 secrets。GitHub 自带的 `GITHUB_TOKEN` 会用于推送 GHCR 镜像。
+
+如果还想让流水线自动登录服务器并启动 Docker，需要在 GitHub 仓库设置这些 Repository secrets：
+
+| Secret | 是否必填 | 说明 |
+| --- | --- | --- |
+| `DEPLOY_HOST` | 是 | 服务器 IP 或域名 |
+| `DEPLOY_USER` | 是 | SSH 用户名 |
+| `DEPLOY_SSH_KEY` | 是 | SSH 私钥内容 |
+| `DEPLOY_PORT` | 否 | SSH 端口，默认 `22` |
+| `DEPLOY_PATH` | 否 | 服务器部署目录，默认 `/opt/melomemo` |
+| `GHCR_USERNAME` | 私有镜像时建议 | 拉取 GHCR 镜像的用户名，默认使用触发流水线的 GitHub 用户 |
+| `GHCR_TOKEN` | 私有镜像时建议 | 有 `read:packages` 权限的 GitHub PAT |
+
+服务器需要预先安装：
+
+- Docker
+- Docker Compose plugin，也就是能执行 `docker compose version`
+
+服务器首次准备示例：
+
+```bash
+sudo mkdir -p /opt/melomemo
+sudo chown -R "$USER":"$USER" /opt/melomemo
+```
+
+如果需要讯飞、YouTube API 或微信登录，在服务器部署目录创建 `.env.docker`：
+
+```bash
+cd /opt/melomemo
+nano .env.docker
+```
+
+可以参考仓库里的 `.env.docker.example`。
+
+部署流程实际执行：
+
+1. GitHub Actions 构建镜像。
+2. 推送镜像到 GHCR。
+3. 通过 SSH 连接服务器。
+4. 把 `docker-compose.prod.yml` 复制到服务器的 `DEPLOY_PATH/docker-compose.yml`。
+5. 执行：
+
+```bash
+docker compose pull
+docker compose up -d
+docker image prune -f
+```
+
+如果没有配置 `DEPLOY_HOST`、`DEPLOY_USER` 或 `DEPLOY_SSH_KEY`，部署步骤会跳过，但镜像构建和推送仍会完成。
+
 只运行镜像：
 
 ```bash
